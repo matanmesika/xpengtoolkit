@@ -5,6 +5,7 @@ Run without Home Assistant, devices or XPENG credentials.
 from __future__ import annotations
 
 import ast
+import logging
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -26,7 +27,8 @@ def method(name):
         ast.ImportFrom(module="__future__", names=[ast.alias(name="annotations")], level=0),
         node,
     ], type_ignores=[])
-    env = {"datetime": datetime, "timezone": timezone}
+    env = {"datetime": datetime, "timezone": timezone,
+           "_LOGGER": logging.getLogger(__name__)}
     exec(compile(ast.fix_missing_locations(module), str(ROOT / "coordinator.py"), "exec"), env)
     return env[name]
 
