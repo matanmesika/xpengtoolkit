@@ -283,6 +283,53 @@ class PassiveQueryPublishStatus(unittest.TestCase):
         self.assertTrue(client.send_query(VIN))
 
 
+class BootstrapWithoutFullState(unittest.TestCase):
+    def test_initial_drive_only_frame_is_delivered_before_full_snapshot(self):
+        client, calls = _client()
+        client._last_full_content = None
+        frame = {"drive": {"speed": 47, "latitude": 32.1, "longitude": 34.8}}
+        client._on_message(None, None, _Msg(_state(interval=frame)))
+        self.assertEqual(len(calls), 1)
+        self.assertTrue(calls[0]["has_fresh_speed_data"])
+        self.assertTrue(calls[0]["has_fresh_location_data"])
+        self.assertEqual(client._last_full_content["interval"], frame)
+
+        # Repeated exact packet should not reset freshness/notify again.
+        last = client.last_meaningful_state_ts
+        client._on_message(None, None, _Msg(_state(interval=frame)))
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(last, client.last_meaningful_state_ts)
+
+        # Next speed-only update must keep the GPS seen on bootstrap.
+        client._on_message(None, None, _Msg(_state(
+            interval={"drive": {"speed": 48}}
+        )))
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(calls[-1]["msg_content"]["interval"]["drive"]["speed"], 48)
+        self.assertEqual(calls[-1]["msg_content"]["interval"]["drive"]["latitude"], 32.1)
+
+    def test_initial_empty_ack_does_not_create_false_vehicle_state(self):
+        client, calls = _client()
+        client._last_full_content = None
+        client._on_message(None, None, _Msg(_state(interval={"drive": {}})))
+        client._on_message(None, None, _Msg(_state()))
+        self.assertEqual(calls, [])
+        self.assertIsNone(client._last_full_content)
+
+    def test_null_partial_sections_do_not_erase_last_accepted_values(self):
+        cached = {
+            "code": 200,
+            "instant": {"drive": {"shift_state": 3}},
+            "interval": {"drive": {"speed": 0, "latitude": 32.1, "longitude": 34.8}},
+        }
+        client, calls = _client(cached)
+        client._on_message(None, None, _Msg(_state(
+            instant={"drive": None}, interval={"drive": None}
+        )))
+        self.assertEqual(calls, [])
+        self.assertEqual(client._last_full_content, cached)
+
+
 class UnsentCommandsAreReported(unittest.TestCase):
     """A command that never went out must raise, not return."""
 
