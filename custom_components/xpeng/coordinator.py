@@ -327,7 +327,7 @@ class XPengDataCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         has_fresh_speed_data = data.pop("has_fresh_speed_data", False)
         has_fresh_charge_data = data.pop("has_fresh_charge_data", False)
         has_fresh_mode_data = data.pop("has_fresh_mode_data", False)
-        prior_motion = self.vehicle_parked
+        prior_motion = getattr(self, "vehicle_parked", None)
         self._last_full_data = data
         self.last_data_timestamp = datetime.now(timezone.utc)
         if has_fresh_energy_data:
@@ -343,7 +343,7 @@ class XPengDataCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if has_fresh_mode_data:
             self.last_mode_timestamp = self.last_data_timestamp
         self.state_is_restored = False
-        new_motion = self.vehicle_parked
+        new_motion = getattr(self, "vehicle_parked", None)
         if (prior_motion is not None and new_motion is not None
                 and prior_motion != new_motion):
             self.last_motion_transition = (
