@@ -532,6 +532,120 @@ class XPengPollingStatusSensor(XPengPolledSensor):
         return attrs
 
 
+class XPengOperationalStateSensor(XPengPolledSensor):
+    """Inferred activity plus raw mode and age: silence is not proven sleep."""
+
+    _attr_has_entity_name = True
+    _attr_name = "Operational state"
+    _attr_icon = "mdi:car-clock"
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    def __init__(self, coordinator: XPengDataCoordinator) -> None:
+        super().__init__(coordinator)
+        self._attr_unique_id = f"xpeng_{self._vin}_operational_state"
+
+    @property
+    def native_value(self) -> str:
+        c = self.coordinator
+        now = datetime.now(timezone.utc)
+        instant = (c.last_full_data or {}).get("msg_content", {}).get("instant", {})
+        ext = instant.get("ext", {}) if isinstance(instant, dict) else {}
+        raw = ext.get("vehicleMode") if isinstance(ext, dict) else None
+        age = telemetry_age(getattr(c, "last_mode_timestamp", None), now)
+        if age is None or age >= 300:
+            raw = None
+        return classify_operational(
+            connected=bool(c.poll_status.get("mqtt_connected")),
+            restored=c.state_is_restored,
+            data_age=telemetry_age(c.last_data_timestamp, now),
+            parked=c.vehicle_parked,
+            charging=c.is_charging,
+            raw_mode=raw,
+        )
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        c = self.coordinator
+        now = datetime.now(timezone.utc)
+        instant = (c.last_full_data or {}).get("msg_content", {}).get("instant", {})
+        ext = instant.get("ext", {}) if isinstance(instant, dict) else {}
+        last_change = getattr(c, "last_motion_transition_timestamp", None)
+        return {
+            "meaning": explain_operational(self.native_value),
+            "raw_cloud_vehicle_mode": ext.get("vehicleMode") if isinstance(ext, dict) else None,
+            "cloud_mode_age_s": telemetry_age(getattr(c, "last_mode_timestamp", None), now),
+            "data_age_s": telemetry_age(c.last_data_timestamp, now),
+            "gps_age_s": telemetry_age(c.last_location_timestamp, now),
+            "shift_age_s": telemetry_age(getattr(c, "last_shift_timestamp", None), now),
+            "speed_age_s": telemetry_age(getattr(c, "last_speed_timestamp", None), now),
+            "charge_age_s": telemetry_age(getattr(c, "last_charge_timestamp", None), now),
+            "sleep_confirmed": False,
+            "last_motion_transition": getattr(c, "last_motion_transition", None),
+            "transition_at": last_change.isoformat() if last_change else None,
+            "motion_transition_count": getattr(c, "motion_transition_count", 0),
+        }
+
+
+class XPengMotionDiagnosticSensor(XPengPolledSensor):
+    """Explain motion freshness separately from reported vehicleMode."""
+
+    _attr_has_entity_name = True
+    _attr_name = "Motion diagnosis"
+    _attr_icon = "mdi:car-shift-pattern"
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    def __init__(self, coordinator: XPengDataCoordinator) -> None:
+        super().__init__(coordinator)
+        self._attr_unique_id = f"xpeng_{self._vin}_motion_diagnosis"
+
+    @property
+    def native_value(self) -> str:
+        value = self.coordinator.vehicle_parked
+        return "Parked" if value is True else "Driving" if value is False else "Unknown"
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        c = self.coordinator
+        now = datetime.now(timezone.utc)
+        return {
+            "shift_age_s": telemetry_age(getattr(c, "last_shift_timestamp", None), now),
+            "speed_age_s": telemetry_age(getattr(c, "last_speed_timestamp", None), now),
+            "transition_count": getattr(c, "motion_transition_count", 0),
+            "last_transition": getattr(c, "last_motion_transition", None),
+        }
+
+
+class XPengGpsFreshnessSensor(XPengPolledSensor):
+    """GPS age excludes all non-GPS MQTT traffic and REST data."""
+
+    _attr_has_entity_name = True
+    _attr_name = "GPS freshness"
+    _attr_icon = "mdi:map-marker-check"
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    def __init__(self, coordinator: XPengDataCoordinator) -> None:
+        super().__init__(coordinator)
+        self._attr_unique_id = f"xpeng_{self._vin}_gps_freshness"
+
+    @property
+    def native_value(self) -> str:
+        c = self.coordinator
+        age = telemetry_age(c.last_location_timestamp, datetime.now(timezone.utc))
+        if c.state_is_restored:
+            return "Cached"
+        if age is None:
+            return "Unknown"
+        return "Fresh" if age < 900 else "Stale"
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        ts = self.coordinator.last_location_timestamp
+        return {
+            "gps_age_s": telemetry_age(ts, datetime.now(timezone.utc)),
+            "last_live_fix": ts.isoformat() if ts else None,
+        }
+
+
 class XPengNextPollSensor(XPengPolledSensor):
     """When the next MQTT query is due."""
 
