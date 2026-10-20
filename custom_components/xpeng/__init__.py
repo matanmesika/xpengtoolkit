@@ -1040,8 +1040,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     if capture_enabled:
         # Empty means "the known CAN topics", which is what someone enabling a
         # capture almost always wants; a typed list replaces them entirely.
+        # Expand the same {user_id}/{device_id} placeholders as the listener.
+        # A user can capture the primary state topic without knowing or exposing
+        # their account UID in Home Assistant's options.
         capture_topics = parse_listener_topics(
-            entry.options.get(CONF_CAPTURE_TOPICS, "")
+            entry.options.get(CONF_CAPTURE_TOPICS, ""),
+            user_id=user_id,
+            device_id=mqtt_client.device_id,
         ) or list(MQTT_DISCOVERY_CANDIDATES)
         preferred = entry.options.get(CONF_CAPTURE_PATH, DEFAULT_CAPTURE_PATH)
         try:
