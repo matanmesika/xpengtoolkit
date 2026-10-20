@@ -72,10 +72,18 @@ def _stub_paho() -> None:
 
 
 _stub_paho()
-_spec = importlib.util.spec_from_file_location("mqtt_client_delivery", MODULE_PATH)
+# The production module uses a relative import (.location_freshness).
+# Load it inside a minimal fake package so these tests remain standalone
+# without importing the Home Assistant integration package.
+_PACKAGE = "xpeng_mqtt_state_delivery_testpkg"
+_package = types.ModuleType(_PACKAGE)
+_package.__path__ = [str(COMPONENT)]
+sys.modules.setdefault(_PACKAGE, _package)
+_MODULE_NAME = f"{_PACKAGE}.mqtt_client_delivery"
+_spec = importlib.util.spec_from_file_location(_MODULE_NAME, MODULE_PATH)
 assert _spec and _spec.loader
 mqtt_client = importlib.util.module_from_spec(_spec)
-sys.modules["mqtt_client_delivery"] = mqtt_client
+sys.modules[_MODULE_NAME] = mqtt_client
 _spec.loader.exec_module(mqtt_client)
 
 
