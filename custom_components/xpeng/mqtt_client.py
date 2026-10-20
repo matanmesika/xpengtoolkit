@@ -1207,6 +1207,8 @@ class XPengMQTTClient:
                 return
 
             instant = content.get("instant", {})
+            if not isinstance(instant, dict):
+                instant = {}
             # A true full state has ext + sufficient other sections.
             # We require ext (vehicle mode/sentinel/etc.) plus at least one
             # of: charge, drive, power, odometer, door — this handles both
@@ -1374,10 +1376,52 @@ class XPengMQTTClient:
                     self._last_meaningful_state_ts = time.time()
                     self._state_callback(vehicle_data)
             else:
-                _LOGGER.debug(
-                    "Minimal response (no prior data), %d bytes — ignoring",
-                    payload_len,
+                # A fresh integration may first hear a narrow drive/GPS/charge
+                # update, particularly if cloud full-state fanout is stalled.
+                # Do not discard that real evidence solely because we have
+                # not received an ext-bearing full snapshot yet. Reject tiny
+                # acknowledgements without a useful field.
+                interval = content.get("interval")
+                interval = interval if isinstance(interval, dict) else {}
+                idrive = instant.get("drive")
+                idrive = idrive if isinstance(idrive, dict) else {}
+                interval_drive = interval.get("drive")
+                interval_drive = interval_drive if isinstance(interval_drive, dict) else {}
+                charge = instant.get("charge")
+                charge = charge if isinstance(charge, dict) else {}
+                interval_charge = interval.get("charge")
+                interval_charge = interval_charge if isinstance(interval_charge, dict) else {}
+                has_shift = "shift_state" in idrive
+                has_speed = "speed" in idrive or "speed" in interval_drive
+                has_position = has_fresh_position(content)
+                has_charge = any(
+                    k in charge for k in ("battery_soc", "charging_state", "charge_power")
+                ) or "power" in interval_charge
+                if not (has_shift or has_speed or has_position or has_charge):
+                    _LOGGER.debug("Minimal response (no prior data), %dB — ignoring",
+                                  payload_len)
+                    return
+                _LOGGER.info(
+                    "Initial partial state (%dB): speed=%s shift=%s GPS=%s charge=%s",
+                    payload_len, has_speed, has_shift, has_position, has_charge,
                 )
+                self._last_full_content = content
+                vehicle_data = {
+                    "vin": data.get("target_id", ""),
+                    "msg_content": content,
+                    "has_fresh_energy_data": bool(charge or instant.get("odometer")),
+                    "has_fresh_location_data": has_position,
+                    "has_fresh_mode_data": (
+                        isinstance(instant.get("ext"), dict)
+                        and "vehicleMode" in instant["ext"]
+                    ),
+                    "has_fresh_shift_data": has_shift,
+                    "has_fresh_speed_data": has_speed,
+                    "has_fresh_charge_data": bool(charge or interval_charge),
+                }
+                if self._state_callback is not None:
+                    self._last_meaningful_state_ts = time.time()
+                    self._state_callback(vehicle_data)
 
         except Exception:
             _LOGGER.exception("Error parsing XPENG MQTT message")
