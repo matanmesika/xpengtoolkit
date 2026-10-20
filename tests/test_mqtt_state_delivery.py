@@ -140,6 +140,31 @@ class AsleepAckIsNotData(unittest.TestCase):
         client._on_message(None, None, _Msg(_state()))
         self.assertEqual(calls, [])
 
+    def test_repeated_changed_partial_does_not_mask_staleness(self):
+        """A partial changed since FULL must be accepted only once.
+
+        Without advancing the comparison baseline, every identical retry
+        fires the coordinator callback and resets the watchdog's meaningful
+        data timer, even though there is no further change.
+        """
+        client, calls = _client()
+        first = {"charge": {"power": 1200, "electricity": 1}}
+        client._on_message(None, None, _Msg(_state(interval=first)))
+        self.assertEqual(len(calls), 1)
+        accepted_at = client.last_meaningful_state_ts
+        self.assertEqual(client._last_full_content["interval"], first)
+
+        # A repeated stub after that update must not appear as fresh data.
+        client._on_message(None, None, _Msg(_state(interval=first)))
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(client.last_meaningful_state_ts, accepted_at)
+
+        # New telemetry must still flow, including a value returning to zero.
+        second = {"charge": {"power": 0, "electricity": 1}}
+        client._on_message(None, None, _Msg(_state(interval=second)))
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(calls[-1]["msg_content"]["interval"], second)
+
 
 class RealChangesStillArrive(unittest.TestCase):
     def test_a_changed_section_reaches_the_coordinator(self):
