@@ -1148,11 +1148,17 @@ class XPengDataCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if shift is not None:
             if isinstance(shift, str):
                 val = shift.strip().upper()
-                if val in ("P", "D", "R", "N"):
-                    parked_shift = val == "P"
+                if val == "P":
+                    parked_shift = True
+                elif val in ("D", "R"):
+                    parked_shift = False
             else:
                 try:
-                    parked_shift = int(shift) in (3, 4)
+                    number = int(shift)
+                    if number in (3, 4):
+                        parked_shift = True
+                    elif number in (1, 2):
+                        parked_shift = False
                 except (TypeError, ValueError):
                     pass
 
