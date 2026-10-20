@@ -121,6 +121,9 @@ class XPengDataCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # restart, and read by the last-renewal sensor.
         self.last_renewal: datetime | None = None
         self.last_data_timestamp: datetime | None = None
+        # Only a real GPS-bearing MQTT frame advances this clock. REST merges
+        # and restored cached frames must not make an old position look live.
+        self.last_location_timestamp: datetime | None = None
         # Distinct from last_data_timestamp: only bumped when a message
         # actually carried fresh charge/odometer data, not just any MQTT
         # traffic (partial pings for door/window/ext must not mask staleness
@@ -310,10 +313,13 @@ class XPengDataCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         network thread, so it runs on the HA event loop.
         """
         has_fresh_energy_data = data.pop("has_fresh_energy_data", False)
+        has_fresh_location_data = data.pop("has_fresh_location_data", False)
         self._last_full_data = data
         self.last_data_timestamp = datetime.now(timezone.utc)
         if has_fresh_energy_data:
             self.last_energy_data_timestamp = self.last_data_timestamp
+        if has_fresh_location_data:
+            self.last_location_timestamp = self.last_data_timestamp
         self.state_is_restored = False
         # Update the parked-drain estimate before notifying entities (reads the
         # freshly-set _last_full_data via vehicle_parked / is_charging).
