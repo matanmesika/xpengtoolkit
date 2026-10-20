@@ -291,6 +291,13 @@ class XPengMQTTClient:
         self._listener_topics: list[str] = []
         self._discovery_enabled = False
         self._subscription_mids: dict[int, str] = {}  # mid -> topic
+        # A TCP/MQTT CONNECT may succeed while the broker rejects SUBSCRIBE.
+        # Keep the real vehicle topic's SUBACK separate from CAN discovery,
+        # and never publish user IDs/topic paths in diagnostic attributes.
+        self._primary_subscriptions: dict[str, dict[str, str | None]] = {
+            "state": {"status": "disconnected", "reason": None},
+            "v2": {"status": "disconnected", "reason": None},
+        }
         # Topics already announced at INFO, so a firehose logs one line each and no more.
         self._listener_logged_topics: set[str] = set()
 
@@ -320,6 +327,11 @@ class XPengMQTTClient:
     def connected(self) -> bool:
         """Return True if currently connected."""
         return self._connected
+
+    @property
+    def primary_subscriptions(self) -> dict[str, dict[str, str | None]]:
+        """Safe snapshot of vehicle topic SUBACKs, without account-scoped paths."""
+        return {name: dict(result) for name, result in self._primary_subscriptions.items()}
 
     @property
     def last_msg_ts(self) -> float:
@@ -955,10 +967,23 @@ class XPengMQTTClient:
             self._last_msg_ts = time.time()
             self._settle_refusals = 0
             self._cancel_settle_retry()
-            client.subscribe(self.recv_topic, qos=1)
-            # V2 protocol — log payloads via the listener path so we can
-            # characterise their shape before deciding how to parse them.
-            client.subscribe(self.recv_topic_v2, qos=1)
+            # Track primary and V2 subscriptions by MID. Previously their
+            # SUBACKs logged topic=None, hiding a refused vehicle-data stream
+            # even while the socket and Credentials valid sensors stayed ON.
+            self._primary_subscriptions = {
+                "state": {"status": "pending", "reason": None},
+                "v2": {"status": "pending", "reason": None},
+            }
+            for label, topic in (("state", self.recv_topic), ("v2", self.recv_topic_v2)):
+                result, mid = client.subscribe(topic, qos=1)
+                if result != mqtt.MQTT_ERR_SUCCESS:
+                    self._primary_subscriptions[label] = {
+                        "status": "rejected",
+                        "reason": f"subscribe returned {result}",
+                    }
+                    _LOGGER.warning("XPENG %s topic subscribe failed locally: %s", label, result)
+                elif mid is not None:
+                    self._subscription_mids[int(mid)] = topic
             # Subscribe to listener topics after primary subscription
             self._subscribe_listener_topics()
         else:
@@ -1041,6 +1066,10 @@ class XPengMQTTClient:
         """Handle disconnection. Paho will auto-reconnect."""
         self._connected = False
         self._subscription_mids.clear()
+        self._primary_subscriptions = {
+            "state": {"status": "disconnected", "reason": None},
+            "v2": {"status": "disconnected", "reason": None},
+        }
         rc_str = str(rc) if rc is not None else "None"
         if rc_str in ("Normal disconnection", "0"):
             _LOGGER.debug("XPENG MQTT disconnected normally")
@@ -1098,7 +1127,7 @@ class XPengMQTTClient:
         )
 
         if topic is None:
-            # This is the primary recv_topic subscription, ignore
+            # Unknown SUBACK: no pending MID to attribute to a topic.
             return
 
         # Check reason codes for acceptance/rejection
@@ -1125,6 +1154,20 @@ class XPengMQTTClient:
                         reason = code_str
                         break
                     reason = code_str
+
+        if topic in (self.recv_topic, self.recv_topic_v2):
+            label = "state" if topic == self.recv_topic else "v2"
+            self._primary_subscriptions[label] = {
+                "status": "accepted" if accepted else "rejected",
+                "reason": reason,
+            }
+            if accepted:
+                _LOGGER.info("XPENG %s vehicle topic SUBACK: accepted (%s)", label, reason)
+            else:
+                _LOGGER.warning("XPENG %s vehicle topic SUBACK: REJECTED (%s)", label, reason)
+            # Primary topics are NOT discovery probes; don't change the
+            # existing 0 accepted / 8 rejected discovery counter semantics.
+            return
 
         if self._subscription_result_callback:
             try:
