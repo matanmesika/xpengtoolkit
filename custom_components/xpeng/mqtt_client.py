@@ -1240,6 +1240,14 @@ class XPengMQTTClient:
                         instant.get("charge") or instant.get("odometer")
                     ),
                     "has_fresh_location_data": has_fresh_position(content),
+                    "has_fresh_charge_data": (
+                        isinstance(instant.get("charge"), dict)
+                        and bool(instant["charge"])
+                    ) or (
+                        isinstance(content.get("interval"), dict)
+                        and isinstance(content["interval"].get("charge"), dict)
+                        and bool(content["interval"]["charge"])
+                    ),
                     "has_fresh_shift_data": (
                         isinstance(instant.get("drive"), dict)
                         and "shift_state" in instant["drive"]
@@ -1328,6 +1336,14 @@ class XPengMQTTClient:
                         instant.get("charge") or instant.get("odometer")
                     ),
                     "has_fresh_location_data": has_fresh_position(content),
+                    "has_fresh_charge_data": (
+                        isinstance(instant.get("charge"), dict)
+                        and bool(instant["charge"])
+                    ) or (
+                        isinstance(content.get("interval"), dict)
+                        and isinstance(content["interval"].get("charge"), dict)
+                        and bool(content["interval"]["charge"])
+                    ),
                     "has_fresh_shift_data": (
                         isinstance(instant.get("drive"), dict)
                         and "shift_state" in instant["drive"]
