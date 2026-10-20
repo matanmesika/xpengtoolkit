@@ -6,18 +6,9 @@ on:
       - fix/live-location-freshness
   pull_request:
     paths:
-      - custom_components/xpeng/location_freshness.py
-      - custom_components/xpeng/mqtt_client.py
-      - custom_components/xpeng/coordinator.py
-      - custom_components/xpeng/device_tracker.py
-      - tests/test_location_freshness.py
-      - tests/test_mqtt_state_delivery.py
-      - tests/test_motion_cadence.py
-      - tests/test_operational_state.py
-      - tests/test_automatic_query.py
-      - custom_components/xpeng/operational_state.py
-      - custom_components/xpeng/sensor.py
-      - .github/workflows/xpeng-location-freshness.yml
+      - 'custom_components/xpeng/**'
+      - 'tests/**'
+      - '.github/workflows/xpeng-location-freshness.yml'
   workflow_dispatch:
 
 permissions:
