@@ -212,6 +212,62 @@ class RealChangesStillArrive(unittest.TestCase):
         self.assertEqual(calls[0]["msg_content"]["interval"]["charge"]["power"], 0)
 
 
+class NarrowPartialMergeKeepsVehicleFields(unittest.TestCase):
+    def test_speed_patch_preserves_last_gps_and_other_sections(self):
+        """A speed-only interval patch must not erase GPS or battery values."""
+        cached = {
+            "code": 200,
+            "instant": {
+                "drive": {"shift_state": 1, "motor_temperature": 33},
+                "charge": {"battery_soc": 50, "charging_state": 0},
+            },
+            "interval": {
+                "drive": {"latitude": 32.12, "longitude": 34.82, "speed": 35},
+                "charge": {"power": 0, "electricity": 2},
+            },
+        }
+        client, calls = _client(cached)
+        client._on_message(None, None, _Msg(_state(
+            instant={"drive": {"shift_state": 3}},
+            interval={"drive": {"speed": 0}},
+        )))
+        self.assertEqual(len(calls), 1)
+        merged = calls[0]["msg_content"]
+        self.assertEqual(merged["interval"]["drive"]["speed"], 0)
+        self.assertEqual(merged["interval"]["drive"]["latitude"], 32.12)
+        self.assertEqual(merged["interval"]["drive"]["longitude"], 34.82)
+        self.assertEqual(merged["interval"]["charge"], cached["interval"]["charge"])
+        self.assertEqual(merged["instant"]["drive"]["shift_state"], 3)
+        self.assertEqual(merged["instant"]["drive"]["motor_temperature"], 33)
+        self.assertEqual(merged["instant"]["charge"]["battery_soc"], 50)
+        self.assertEqual(cached["instant"]["drive"]["shift_state"], 1)
+        self.assertEqual(cached["interval"]["drive"]["speed"], 35)
+
+        # Same partial a second time must not reset the data freshness clock.
+        last = client.last_meaningful_state_ts
+        client._on_message(None, None, _Msg(_state(
+            instant={"drive": {"shift_state": 3}},
+            interval={"drive": {"speed": 0}},
+        )))
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(last, client.last_meaningful_state_ts)
+
+    def test_nested_charge_update_preserves_other_fields(self):
+        """A SOC patch must not make the charge limit disappear."""
+        cached = {"code": 200, "instant": {"charge": {
+            "battery_soc": 55, "charge_limit": 80, "charging_state": 2
+        }}}
+        client, calls = _client(cached)
+        client._on_message(None, None, _Msg(_state(
+            instant={"charge": {"battery_soc": 56}}
+        )))
+        self.assertEqual(len(calls), 1)
+        updated = calls[-1]["msg_content"]["instant"]["charge"]
+        self.assertEqual(updated["battery_soc"], 56)
+        self.assertEqual(updated["charge_limit"], 80)
+        self.assertEqual(updated["charging_state"], 2)
+
+
 class UnsentCommandsAreReported(unittest.TestCase):
     """A command that never went out must raise, not return."""
 
