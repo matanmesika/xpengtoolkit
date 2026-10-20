@@ -1240,6 +1240,18 @@ class XPengMQTTClient:
                         instant.get("charge") or instant.get("odometer")
                     ),
                     "has_fresh_location_data": has_fresh_position(content),
+                    "has_fresh_shift_data": (
+                        isinstance(instant.get("drive"), dict)
+                        and "shift_state" in instant["drive"]
+                    ),
+                    "has_fresh_speed_data": (
+                        isinstance(instant.get("drive"), dict)
+                        and "speed" in instant["drive"]
+                    ) or (
+                        isinstance(content.get("interval"), dict)
+                        and isinstance(content["interval"].get("drive"), dict)
+                        and "speed" in content["interval"]["drive"]
+                    ),
                 }
                 if self._state_callback is not None:
                     # This is the point where a message stops being a ping and
@@ -1316,6 +1328,18 @@ class XPengMQTTClient:
                         instant.get("charge") or instant.get("odometer")
                     ),
                     "has_fresh_location_data": has_fresh_position(content),
+                    "has_fresh_shift_data": (
+                        isinstance(instant.get("drive"), dict)
+                        and "shift_state" in instant["drive"]
+                    ),
+                    "has_fresh_speed_data": (
+                        isinstance(instant.get("drive"), dict)
+                        and "speed" in instant["drive"]
+                    ) or (
+                        isinstance(content.get("interval"), dict)
+                        and isinstance(content["interval"].get("drive"), dict)
+                        and "speed" in content["interval"]["drive"]
+                    ),
                 }
                 if self._state_callback is not None:
                     # This is the point where a message stops being a ping and
