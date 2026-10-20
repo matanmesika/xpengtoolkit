@@ -268,6 +268,21 @@ class NarrowPartialMergeKeepsVehicleFields(unittest.TestCase):
         self.assertEqual(updated["charging_state"], 2)
 
 
+class PassiveQueryPublishStatus(unittest.TestCase):
+    def test_send_query_returns_false_if_offline(self):
+        client, _ = _client()
+        self.assertFalse(client.send_query(VIN))
+
+    def test_send_query_propagates_publish_status(self):
+        client, _ = _client()
+        client._client = object()
+        client._connected = True
+        client.send_command = lambda *_args, **_kwargs: False
+        self.assertFalse(client.send_query(VIN))
+        client.send_command = lambda *_args, **_kwargs: True
+        self.assertTrue(client.send_query(VIN))
+
+
 class UnsentCommandsAreReported(unittest.TestCase):
     """A command that never went out must raise, not return."""
 
