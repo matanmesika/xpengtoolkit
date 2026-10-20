@@ -1248,8 +1248,8 @@ class XPengMQTTClient:
                     self._last_meaningful_state_ts = time.time()
                     self._state_callback(vehicle_data)
             elif self._last_full_content is not None:
-                # Partial response — merge non-empty instant sections into last
-                # full state so sensors update with whatever data the car sent.
+                # Partial response — merge non-empty instant sections into the
+                # last accepted state so identical retries are not new data.
                 merged = dict(self._last_full_content)
                 merged_instant = dict(merged.get("instant", {}))
                 for key, val in instant.items():
@@ -1283,10 +1283,15 @@ class XPengMQTTClient:
                     )
                     return
                 _LOGGER.debug(
-                    "Partial state (%dB, keys=%s) — merged with last full state",
+                    "Partial state (%dB, keys=%s) — merged with last accepted state",
                     payload_len,
                     list(instant.keys()),
                 )
+                # Keep the comparison baseline in sync with what was accepted.
+                # Without this, the same short partial differs from the last
+                # FULL state on every retry, masquerading as fresh telemetry and
+                # preventing the silence watchdog from escalating.
+                self._last_full_content = merged
                 vehicle_data = {
                     "vin": data.get("target_id", ""),
                     "msg_content": merged,

@@ -72,10 +72,18 @@ def _stub_paho() -> None:
 
 
 _stub_paho()
-_spec = importlib.util.spec_from_file_location("mqtt_client_delivery", MODULE_PATH)
+# The production module uses a relative import (.location_freshness).
+# Load it inside a minimal fake package so these tests remain standalone
+# without importing the Home Assistant integration package.
+_PACKAGE = "xpeng_mqtt_state_delivery_testpkg"
+_package = types.ModuleType(_PACKAGE)
+_package.__path__ = [str(COMPONENT)]
+sys.modules.setdefault(_PACKAGE, _package)
+_MODULE_NAME = f"{_PACKAGE}.mqtt_client_delivery"
+_spec = importlib.util.spec_from_file_location(_MODULE_NAME, MODULE_PATH)
 assert _spec and _spec.loader
 mqtt_client = importlib.util.module_from_spec(_spec)
-sys.modules["mqtt_client_delivery"] = mqtt_client
+sys.modules[_MODULE_NAME] = mqtt_client
 _spec.loader.exec_module(mqtt_client)
 
 
@@ -139,6 +147,31 @@ class AsleepAckIsNotData(unittest.TestCase):
         client, calls = _client()
         client._on_message(None, None, _Msg(_state()))
         self.assertEqual(calls, [])
+
+    def test_repeated_changed_partial_does_not_mask_staleness(self):
+        """A partial changed since FULL must be accepted only once.
+
+        Without advancing the comparison baseline, every identical retry
+        fires the coordinator callback and resets the watchdog's meaningful
+        data timer, even though there is no further change.
+        """
+        client, calls = _client()
+        first = {"charge": {"power": 1200, "electricity": 1}}
+        client._on_message(None, None, _Msg(_state(interval=first)))
+        self.assertEqual(len(calls), 1)
+        accepted_at = client.last_meaningful_state_ts
+        self.assertEqual(client._last_full_content["interval"], first)
+
+        # A repeated stub after that update must not appear as fresh data.
+        client._on_message(None, None, _Msg(_state(interval=first)))
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(client.last_meaningful_state_ts, accepted_at)
+
+        # New telemetry must still flow, including a value returning to zero.
+        second = {"charge": {"power": 0, "electricity": 1}}
+        client._on_message(None, None, _Msg(_state(interval=second)))
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(calls[-1]["msg_content"]["interval"], second)
 
 
 class RealChangesStillArrive(unittest.TestCase):
