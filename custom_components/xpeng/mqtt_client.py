@@ -1251,13 +1251,25 @@ class XPengMQTTClient:
                 # Partial response — merge non-empty instant sections into the
                 # last accepted state so identical retries are not new data.
                 merged = dict(self._last_full_content)
-                merged_instant = dict(merged.get("instant", {}))
-                for key, val in instant.items():
-                    if val:
-                        merged_instant[key] = val
-                merged["instant"] = merged_instant
-                if "interval" in content:
-                    merged["interval"] = content["interval"]
+                # XPENG sends narrow interval/instant patches (for example,
+                # interval.drive.speed only). Replacing an entire section with
+                # such a patch drops GPS, odometer or charge fields that did
+                # not change. Merge per subsection and per field instead.
+                for section in ("instant", "interval"):
+                    patch = content.get(section)
+                    if not isinstance(patch, dict):
+                        continue
+                    previous = merged.get(section)
+                    result = dict(previous) if isinstance(previous, dict) else {}
+                    for key, val in patch.items():
+                        if val == {}:
+                            continue  # an empty update is not a deletion
+                        old = result.get(key)
+                        if isinstance(old, dict) and isinstance(val, dict):
+                            result[key] = {**old, **val}
+                        else:
+                            result[key] = val
+                    merged[section] = result
                 if "digital_vehicle" in content:
                     merged["digital_vehicle"] = content["digital_vehicle"]
 
