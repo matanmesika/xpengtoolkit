@@ -517,6 +517,9 @@ class XPengPollingStatusSensor(XPengPolledSensor):
         last_query = status.get("last_query_at")
         if last_query:
             attrs["last_query_at"] = _iso(last_query)
+        last_failed = status.get("last_query_failed_at")
+        if last_failed:
+            attrs["last_query_failed_at"] = _iso(last_failed)
         last_rest = status.get("last_rest_poll_at")
         if last_rest:
             attrs["last_rest_poll_at"] = _iso(last_rest)
@@ -555,7 +558,7 @@ class XPengOperationalStateSensor(XPengPolledSensor):
         if age is None or age >= 300:
             raw = None
         return classify_operational(
-            connected=bool(c.poll_status.get("mqtt_connected")),
+            connected=c.poll_status.get("mqtt_connected"),
             restored=c.state_is_restored,
             data_age=telemetry_age(c.last_data_timestamp, now),
             parked=c.vehicle_parked,
