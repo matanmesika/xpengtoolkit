@@ -11,6 +11,8 @@ from typing import Any, Callable, Final
 
 import paho.mqtt.client as mqtt
 
+from .location_freshness import has_fresh_position
+
 _LOGGER = logging.getLogger(__name__)
 
 # Fallback directory for the mTLS material. Kept for callers that do not pass
@@ -1237,6 +1239,7 @@ class XPengMQTTClient:
                     "has_fresh_energy_data": bool(
                         instant.get("charge") or instant.get("odometer")
                     ),
+                    "has_fresh_location_data": has_fresh_position(content),
                 }
                 if self._state_callback is not None:
                     # This is the point where a message stops being a ping and
@@ -1295,6 +1298,7 @@ class XPengMQTTClient:
                     "has_fresh_energy_data": bool(
                         instant.get("charge") or instant.get("odometer")
                     ),
+                    "has_fresh_location_data": has_fresh_position(content),
                 }
                 if self._state_callback is not None:
                     # This is the point where a message stops being a ping and

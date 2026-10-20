@@ -1,0 +1,43 @@
+name: XPENG live-location freshness regression
+
+on:
+  push:
+    branches:
+      - fix/live-location-freshness
+  pull_request:
+    paths:
+      - custom_components/xpeng/location_freshness.py
+      - custom_components/xpeng/mqtt_client.py
+      - custom_components/xpeng/coordinator.py
+      - custom_components/xpeng/device_tracker.py
+      - tests/test_location_freshness.py
+      - .github/workflows/xpeng-location-freshness.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  location-regression:
+    name: GPS freshness (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.13", "3.14"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install pytest
+        run: python -m pip install pytest
+      - name: Compile the affected integration files
+        run: |
+          python -m py_compile custom_components/xpeng/location_freshness.py
+          python -m py_compile custom_components/xpeng/mqtt_client.py
+          python -m py_compile custom_components/xpeng/coordinator.py
+          python -m py_compile custom_components/xpeng/device_tracker.py
+          python -m py_compile tests/test_location_freshness.py
+      - name: Run GPS / MQTT regression tests
+        run: python -m pytest -q tests/test_location_freshness.py
