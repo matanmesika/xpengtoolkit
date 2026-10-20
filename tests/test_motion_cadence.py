@@ -29,6 +29,10 @@ def method(name, *, filename="coordinator.py", class_name="XPengDataCoordinator"
     ], type_ignores=[])
     env = {"datetime": datetime, "timezone": timezone,
            "_LOGGER": logging.getLogger(__name__)}
+    if filename == "sensor.py":
+        def age(ts, now):
+            return max(0, int((now - ts).total_seconds())) if ts is not None else None
+        env["telemetry_age"] = age
     exec(compile(ast.fix_missing_locations(module), str(ROOT / filename), "exec"), env)
     return env[name]
 
