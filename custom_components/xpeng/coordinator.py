@@ -1252,15 +1252,18 @@ class XPengDataCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             return False
         instant = content.get("instant", {})
         if isinstance(instant, dict):
-            if instant.get("charge", {}).get("charging_state") == 2:
+            charge = instant.get("charge")
+            if isinstance(charge, dict) and charge.get("charging_state") == 2:
                 return True
         interval = content.get("interval", {})
         if isinstance(interval, dict):
-            try:
-                if float(interval.get("charge", {}).get("power", 0) or 0) > 0:
-                    return True
-            except (TypeError, ValueError):
-                pass
+            charge = interval.get("charge")
+            if isinstance(charge, dict):
+                try:
+                    if float(charge.get("power", 0) or 0) > 0:
+                        return True
+                except (TypeError, ValueError):
+                    pass
         return False
 
     @property
