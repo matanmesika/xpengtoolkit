@@ -1184,16 +1184,24 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         )
         if now - query_timer_state["last_sent"] < min_gap:
             return
-        query_timer_state["last_sent"] = now
+        sent = False
         try:
             if active:
-                await hass.async_add_executor_job(
+                sent = await hass.async_add_executor_job(
                     mqtt_client.send_command, vin, 19, {"cmd_type": 2}, 2
                 )
             else:
-                await hass.async_add_executor_job(mqtt_client.send_query, vin)
+                sent = await hass.async_add_executor_job(mqtt_client.send_query, vin)
         except Exception:
-            _LOGGER.debug("Periodic MQTT query failed", exc_info=True)
+            _LOGGER.warning("Periodic MQTT query raised before publishing", exc_info=True)
+        if not sent:
+            coordinator.set_poll_status(last_query_failed_at=now)
+            _LOGGER.debug("Periodic MQTT request not published; will retry on next timer tick")
+            return
+        # Only a successful publish moves the query deadline or is advertised
+        # as last_query; otherwise Home Assistant can show a phantom successful
+        # query while MQTT is disconnected.
+        query_timer_state["last_sent"] = now
         coordinator.set_poll_status(
             last_query_at=now,
             last_query_kind="force_upload" if active else "passive",
