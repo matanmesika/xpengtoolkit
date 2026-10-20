@@ -1288,8 +1288,8 @@ class XPengMQTTClient:
                     previous = merged.get(section)
                     result = dict(previous) if isinstance(previous, dict) else {}
                     for key, val in patch.items():
-                        if val == {}:
-                            continue  # an empty update is not a deletion
+                        if val is None or val == {}:
+                            continue  # a null/empty patch is not a deletion
                         old = result.get(key)
                         if isinstance(old, dict) and isinstance(val, dict):
                             result[key] = {**old, **val}
