@@ -21,6 +21,7 @@ from homeassistant.helpers.event import (
 )
 
 from . import poll_status
+from .operational_state import age_seconds as telemetry_age, classify as classify_operational, explain as explain_operational
 from .const import DOMAIN, SENSOR_DESCRIPTIONS, XPengSensorEntityDescription
 from .coordinator import XPengDataCoordinator
 from .entity import XPengEntity
@@ -76,6 +77,9 @@ async def async_setup_entry(
     entities.append(XPengLastUpdateSensor(coordinator))
     entities.append(XPengLastDataUpdateSensor(coordinator))
     entities.append(XPengPollingStatusSensor(coordinator))
+    entities.append(XPengOperationalStateSensor(coordinator))
+    entities.append(XPengMotionDiagnosticSensor(coordinator))
+    entities.append(XPengGpsFreshnessSensor(coordinator))
     entities.append(XPengNextPollSensor(coordinator))
     entities.append(XPengXosVersionSensor(coordinator))
     entities.append(XPengMqttListenerSensor(coordinator))
@@ -138,26 +142,44 @@ class XPengSensor(XPengEntity, SensorEntity):
         self._attr_unique_id = f"xpeng_{self._vin}_{description.key}"
 
     @property
+    def should_poll(self) -> bool:
+        """Expire motion/location readings even when MQTT becomes quiet."""
+        return self.entity_description.key in {
+            "speed", "shift_state", "vehicle_mode", "latitude", "longitude", "heading",
+        }
+
+    @property
     def native_value(self) -> Any:
-        """Return the sensor value; prefer live gear/motion over stale cloud mode."""
-        if self.entity_description.key == "vehicle_mode":
-            # XPENG's ext.vehicleMode can remain Standby (1) while an actual
-            # drive is confirmed by the gear/speed stream. Derive Driving
-            # only when that evidence is recent, rather than showing Standby.
-            if self.coordinator.vehicle_parked is False:
-                return "Driving"
-        if self.entity_description.key == "speed":
-            # A fresh P shift must not leave yesterday's interval speed on
-            # the dashboard when XPENG omitted a speed=0 frame at the stop.
-            if self.coordinator.vehicle_parked is True:
+        """Read raw fields but do not present old movement as current telemetry."""
+        key = self.entity_description.key
+        now = datetime.now(timezone.utc)
+        c = self.coordinator
+        if key in ("latitude", "longitude", "heading"):
+            age = telemetry_age(getattr(c, "last_location_timestamp", None), now)
+            if getattr(c, "state_is_restored", False) or age is None or age >= 900:
+                return None
+        if key == "vehicle_mode":
+            # Raw XPENG cloud mode is preserved. Its Standby may disagree
+            # with observed driving; the new operational sensor explains that.
+            age = telemetry_age(getattr(c, "last_mode_timestamp", None), now)
+            if age is None or age >= 900:
+                return None
+        if key == "shift_state":
+            age = telemetry_age(getattr(c, "last_shift_timestamp", None), now)
+            if age is None or age >= 600:
+                return None
+        if key == "speed":
+            if c.vehicle_parked is True:
                 return 0.0
+            age = telemetry_age(getattr(c, "last_speed_timestamp", None), now)
+            if age is None or age >= 600:
+                return None
         raw = self._get_nested_value(self.entity_description.value_path)
         if raw is None:
             return None
         if self.entity_description.value_fn is not None:
             return self.entity_description.value_fn(raw)
         return raw
-
 
 class XPengAccountSensor(XPengEntity, SensorEntity):
     """Which XPENG account these credentials belong to.
