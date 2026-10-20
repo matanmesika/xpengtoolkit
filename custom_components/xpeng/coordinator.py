@@ -134,6 +134,10 @@ class XPengDataCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self.last_shift_timestamp: datetime | None = None
         self.last_speed_timestamp: datetime | None = None
         self.last_charge_timestamp: datetime | None = None
+        self.last_mode_timestamp: datetime | None = None
+        self.last_motion_transition_timestamp: datetime | None = None
+        self.last_motion_transition: str | None = None
+        self.motion_transition_count: int = 0
         # True while the only state we hold was restored from disk (no live
         # push received yet this session).
         self.state_is_restored: bool = False
@@ -322,6 +326,8 @@ class XPengDataCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         has_fresh_shift_data = data.pop("has_fresh_shift_data", False)
         has_fresh_speed_data = data.pop("has_fresh_speed_data", False)
         has_fresh_charge_data = data.pop("has_fresh_charge_data", False)
+        has_fresh_mode_data = data.pop("has_fresh_mode_data", False)
+        prior_motion = self.vehicle_parked
         self._last_full_data = data
         self.last_data_timestamp = datetime.now(timezone.utc)
         if has_fresh_energy_data:
@@ -334,7 +340,18 @@ class XPengDataCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             self.last_speed_timestamp = self.last_data_timestamp
         if has_fresh_charge_data:
             self.last_charge_timestamp = self.last_data_timestamp
+        if has_fresh_mode_data:
+            self.last_mode_timestamp = self.last_data_timestamp
         self.state_is_restored = False
+        new_motion = self.vehicle_parked
+        if (prior_motion is not None and new_motion is not None
+                and prior_motion != new_motion):
+            self.last_motion_transition = (
+                ("Parked" if prior_motion else "Driving")
+                + " -> " + ("Parked" if new_motion else "Driving")
+            )
+            self.last_motion_transition_timestamp = self.last_data_timestamp
+            self.motion_transition_count += 1
         # Update the parked-drain estimate before notifying entities (reads the
         # freshly-set _last_full_data via vehicle_parked / is_charging).
         self._update_parked_consumption(data)
