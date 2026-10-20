@@ -333,8 +333,8 @@ def _load_api_context(entry: ConfigEntry) -> tuple[dict | None, dict | None]:
 
     return None, None
 
-def _available_tenants(
-    entry: ConfigEntry, tenant_file: str
+async def _available_tenants(
+    hass: HomeAssistant, entry: ConfigEntry, tenant_file: str
 ) -> list[tuple[dict, str]]:
     """The tenants this install already has, and where each came from.
 
@@ -364,7 +364,10 @@ def _available_tenants(
 
         try:
             tenants.append(
-                (load_tenant_cache(tenant_file), f"the tenant file {tenant_file}")
+                (
+                    await hass.async_add_executor_job(load_tenant_cache, tenant_file),
+                    f"the tenant file {tenant_file}",
+                )
             )
         except FileNotFoundError:
             pass
@@ -418,7 +421,7 @@ def _tokens_device_id(tokens: dict | None) -> str:
         return parts[3].strip()
     return ""
 
-def _resolve_configured_device_id(
+async def _resolve_configured_device_id(
     hass: HomeAssistant,
     entry: ConfigEntry,
     tenant_file: str,
@@ -446,7 +449,7 @@ def _resolve_configured_device_id(
     logged but not fatal: setup still proceeds, and the REST path raises its own
     actionable error when it needs the id.
     """
-    tenants = _available_tenants(entry, tenant_file)
+    tenants = await _available_tenants(hass, entry, tenant_file)
 
     if configured_device_id:
         _warn_on_device_id_mismatch(entry, configured_device_id, tenants)
@@ -465,10 +468,12 @@ def _resolve_configured_device_id(
 
         if not configured_device_id:
             token_file = entry.options.get(CONF_TOKEN_FILE, "").strip()
-            if token_file and os.path.isfile(token_file):
+            if token_file and await hass.async_add_executor_job(
+                os.path.isfile, token_file
+            ):
                 try:
                     configured_device_id = _tokens_device_id(
-                        load_login_tokens(token_file)
+                        await hass.async_add_executor_job(load_login_tokens, token_file)
                     )
                 except Exception:  # noqa: BLE001 - a bad token file is not fatal
                     _LOGGER.debug(
@@ -866,7 +871,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     # Resolve this install's device identity once and keep it in the entry
     # options, so every restart and reload signs as the same device.
-    configured_device_id = _resolve_configured_device_id(
+    configured_device_id = await _resolve_configured_device_id(
         hass, entry, tenant_file, configured_device_id
     )
 
