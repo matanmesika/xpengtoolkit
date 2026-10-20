@@ -422,7 +422,7 @@ class XPengMQTTClient:
         self._listener_callback = callback
 
     def set_capture_callback(
-        self, callback: Callable[[str, bytes, int, bool], None] | None
+        self, callback: Callable[..., bool] | None
     ) -> None:
         """Set the raw-frame sink: (topic, payload, qos, retain).
 
