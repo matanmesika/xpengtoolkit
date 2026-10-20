@@ -280,7 +280,9 @@ class XPengMQTTClient:
         self._listener_callback: Callable[[str, str], None] | None = None
         # Raw-frame sink for the capture recorder. Called with bytes, before any
         # decoding, because the whole point is to keep the bytes bytes.
-        self._capture_callback: Callable[[str, bytes, int, bool], None] | None = None
+        # CaptureRecorder.submit takes qos/retain as keyword-only arguments.
+        self._capture_callback: Callable[..., bool] | None = None
+        self._capture_topics: list[str] = []
         self._subscription_result_callback: Callable[[str, bool, str], None] | None = None
         self._notification_callback: Callable[[dict[str, Any]], None] | None = None
         self._command_feedback_callback: Callable[[dict[str, Any]], None] | None = None
@@ -483,6 +485,10 @@ class XPengMQTTClient:
                 continue
             self._listener_topics.append(expanded)
         self._discovery_enabled = discovery_enabled
+        # Only record the topics explicitly selected for raw capture.
+        # In particular, don't capture the user's private state messages
+        # merely because capture is enabled for the default CAN candidates.
+        self._capture_topics = list(extra_topics or ())
         if discovery_enabled:
             for candidate in discovery_candidates:
                 if candidate not in self._listener_topics:
@@ -922,6 +928,11 @@ class XPengMQTTClient:
             "Subscribing to %d listener topics", len(self._listener_topics)
         )
         for topic in self._listener_topics:
+            # Both account-scoped state streams are already subscribed by
+            # _on_connect at QoS 1. Re-subscribing them as listener topics can
+            # lower QoS to 0 and needlessly add a duplicate SUBACK.
+            if topic in (self.recv_topic, self.recv_topic_v2):
+                continue
             try:
                 result, mid = self._client.subscribe(topic, qos=0)
                 if mid is not None:
@@ -1145,6 +1156,17 @@ class XPengMQTTClient:
         topic = msg.topic
         payload_bytes = msg.payload
 
+        # Capture primary vehicle frames *before* parsing/filtering them, so
+        # silence, malformed payloads and otherwise ignored messages can be
+        # diagnosed. The recorder is only called when the operator explicitly
+        # selected this topic in capture_topics.
+        if topic == self.recv_topic:
+            self._capture_frame_if_selected(
+                topic, payload_bytes,
+                qos=int(msg.qos or 0),
+                retain=bool(getattr(msg, "retain", False)),
+            )
+
         # Check if this is a listener message (not our primary recv_topic)
         if topic != self.recv_topic:
             self._handle_listener_message(
@@ -1315,6 +1337,29 @@ class XPengMQTTClient:
         except Exception:
             _LOGGER.exception("Error parsing XPENG MQTT message")
 
+    def _capture_frame_if_selected(
+        self,
+        topic: str,
+        payload: bytes,
+        *,
+        qos: int = 0,
+        retain: bool = False,
+    ) -> None:
+        """Offer selected raw MQTT frames to the bounded binary recorder.
+
+        Accept the broker's own topic matching semantics, including + and #.
+        No parsing, log payloads or network calls on the MQTT callback thread.
+        """
+        sink = self._capture_callback
+        if sink is None or not any(
+            mqtt.topic_matches_sub(pattern, topic) for pattern in self._capture_topics
+        ):
+            return
+        try:
+            sink(topic, payload, qos=qos, retain=retain)
+        except Exception:  # noqa: BLE001 - a bad recorder must not drop MQTT
+            _LOGGER.exception("Raw MQTT capture callback failed")
+
     def _handle_listener_message(
         self,
         topic: str,
@@ -1338,11 +1383,7 @@ class XPengMQTTClient:
         in, so for binary frames with no listener callback registered there is
         nothing below worth doing.
         """
-        if self._capture_callback is not None:
-            try:
-                self._capture_callback(topic, payload, qos, retain)
-            except Exception:  # noqa: BLE001 - capture must not drop the connection
-                _LOGGER.exception("Capture callback failed for %s", topic)
+        self._capture_frame_if_selected(topic, payload, qos=qos, retain=retain)
 
         if self._listener_callback is None and payload[:16].lstrip()[:1] != b"{":
             return
