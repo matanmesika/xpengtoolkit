@@ -11,6 +11,8 @@ on:
       - custom_components/xpeng/coordinator.py
       - custom_components/xpeng/device_tracker.py
       - tests/test_location_freshness.py
+      - tests/test_mqtt_state_delivery.py
+      - tests/test_motion_cadence.py
       - .github/workflows/xpeng-location-freshness.yml
   workflow_dispatch:
 
@@ -39,5 +41,24 @@ jobs:
           python -m py_compile custom_components/xpeng/coordinator.py
           python -m py_compile custom_components/xpeng/device_tracker.py
           python -m py_compile tests/test_location_freshness.py
+          python -m py_compile tests/test_mqtt_state_delivery.py
+          python -m py_compile tests/test_motion_cadence.py
       - name: Run GPS / MQTT regression tests
-        run: python -m pytest -q tests/test_location_freshness.py
+        run: python -m pytest -q tests/test_location_freshness.py tests/test_mqtt_state_delivery.py tests/test_motion_cadence.py
+      - name: Run whole integration regression suite
+        run: python -m unittest discover -s tests -v
+      - name: Package side-test beta (only after tests pass)
+        if: github.event_name == 'pull_request' && github.head_ref == 'beta/telemetry-reliability-20261020' && matrix.python-version == '3.13'
+        run: |
+          mkdir -p beta-build/custom_components
+          cp -a custom_components/xpeng beta-build/custom_components/
+          find beta-build -type d -name __pycache__ -prune -exec rm -rf {} +
+          (cd beta-build && zip -qr ../XPENG-Toolkit-0.6.18b1.zip custom_components)
+          unzip -l XPENG-Toolkit-0.6.18b1.zip | head -25
+      - name: Upload side-test package
+        if: github.event_name == 'pull_request' && github.head_ref == 'beta/telemetry-reliability-20261020' && matrix.python-version == '3.13'
+        uses: actions/upload-artifact@v4
+        with:
+          name: XPENG-Toolkit-0.6.18b1
+          path: XPENG-Toolkit-0.6.18b1.zip
+          retention-days: 30

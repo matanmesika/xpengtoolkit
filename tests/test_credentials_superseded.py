@@ -64,7 +64,7 @@ def _load_module():
     })
 
     spec = importlib.util.spec_from_file_location(
-        "mqtt_client_under_test", COMPONENT / "mqtt_client.py"
+        _component.mqtt_test_module_name("mqtt_client_under_test"), COMPONENT / "mqtt_client.py"
     )
     mod = importlib.util.module_from_spec(spec)
     sys.modules["mqtt_client_under_test"] = mod

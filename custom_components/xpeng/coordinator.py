@@ -129,6 +129,11 @@ class XPengDataCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # traffic (partial pings for door/window/ext must not mask staleness
         # of the energy fields — see _merge_widget_state_if_mqtt_stale).
         self.last_energy_data_timestamp: datetime | None = None
+        # Motion timestamps are advanced only by shift/speed fields in the
+        # ORIGINAL MQTT frame, never by cached fields or REST widget merges.
+        self.last_shift_timestamp: datetime | None = None
+        self.last_speed_timestamp: datetime | None = None
+        self.last_charge_timestamp: datetime | None = None
         # True while the only state we hold was restored from disk (no live
         # push received yet this session).
         self.state_is_restored: bool = False
@@ -314,12 +319,21 @@ class XPengDataCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         """
         has_fresh_energy_data = data.pop("has_fresh_energy_data", False)
         has_fresh_location_data = data.pop("has_fresh_location_data", False)
+        has_fresh_shift_data = data.pop("has_fresh_shift_data", False)
+        has_fresh_speed_data = data.pop("has_fresh_speed_data", False)
+        has_fresh_charge_data = data.pop("has_fresh_charge_data", False)
         self._last_full_data = data
         self.last_data_timestamp = datetime.now(timezone.utc)
         if has_fresh_energy_data:
             self.last_energy_data_timestamp = self.last_data_timestamp
         if has_fresh_location_data:
             self.last_location_timestamp = self.last_data_timestamp
+        if has_fresh_shift_data:
+            self.last_shift_timestamp = self.last_data_timestamp
+        if has_fresh_speed_data:
+            self.last_speed_timestamp = self.last_data_timestamp
+        if has_fresh_charge_data:
+            self.last_charge_timestamp = self.last_data_timestamp
         self.state_is_restored = False
         # Update the parked-drain estimate before notifying entities (reads the
         # freshly-set _last_full_data via vehicle_parked / is_charging).
@@ -1097,38 +1111,80 @@ class XPengDataCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
     @property
     def vehicle_parked(self) -> bool | None:
-        """Return whether the vehicle is parked.
+        """Most recent credible driving/parking signal, or unknown if stale.
 
-        Checks both shift_state and speed — if speed > 0, definitely not parked.
+        The cloud puts speed in interval.drive but shift state in
+        instant.drive. A narrow MQTT update may carry just one of these,
+        so neither the cached shift nor cached speed is always the latest.
+        After 10 minutes without a real speed/shift frame, never infer an
+        active car from a saved D gear: that would keep force-uploading
+        every minute and wake a parked car unnecessarily.
         """
         if not self._last_full_data:
             return None
-        drive = (
-            self._last_full_data
-            .get("msg_content", {})
-            .get("instant", {})
-            .get("drive", {})
-        )
-        if not drive:
-            return None
-        # Speed > 0 means definitely not parked
-        speed = drive.get("speed")
-        if speed is not None:
+        content = self._last_full_data.get("msg_content", {})
+        instant = content.get("instant", {}) if isinstance(content, dict) else {}
+        interval = content.get("interval", {}) if isinstance(content, dict) else {}
+        instant_drive = instant.get("drive", {}) if isinstance(instant, dict) else {}
+        interval_drive = interval.get("drive", {}) if isinstance(interval, dict) else {}
+        if not isinstance(instant_drive, dict):
+            instant_drive = {}
+        if not isinstance(interval_drive, dict):
+            interval_drive = {}
+        now = datetime.now(timezone.utc)
+
+        def recent(ts: datetime | None) -> bool:
+            if ts is None:
+                return False
             try:
-                if float(speed) > 0:
+                age = (now - ts).total_seconds()
+            except (TypeError, ValueError):
+                return False
+            return 0 <= age < 600
+
+        shift_ts = getattr(self, "last_shift_timestamp", None)
+        speed_ts = getattr(self, "last_speed_timestamp", None)
+        shift_recent = recent(shift_ts)
+        speed_recent = recent(speed_ts)
+
+        shift = instant_drive.get("shift_state")
+        parked_shift: bool | None = None
+        if shift is not None:
+            if isinstance(shift, str):
+                val = shift.strip().upper()
+                if val == "P":
+                    parked_shift = True
+                elif val in ("D", "R"):
+                    parked_shift = False
+            else:
+                try:
+                    number = int(shift)
+                    if number in (3, 4):
+                        parked_shift = True
+                    elif number in (1, 2):
+                        parked_shift = False
+                except (TypeError, ValueError):
+                    pass
+
+        # Prefer a newer shift change (particularly P after braking) over
+        # an earlier speed reading. A newer positive speed, however, can
+        # correctly reveal a drive even when the last shift frame said P.
+        if shift_recent and (
+            not speed_recent or shift_ts >= speed_ts
+        ) and parked_shift is not None:
+            return parked_shift
+
+        if speed_recent:
+            speed_raw = interval_drive.get("speed", instant_drive.get("speed"))
+            try:
+                if speed_raw is not None and float(speed_raw) > 0:
                     return False
             except (TypeError, ValueError):
                 pass
-        # Fall back to shift_state
-        shift = drive.get("shift_state")
-        if shift is None:
-            return None
-        if isinstance(shift, str):
-            return shift.strip().upper() == "P"
-        try:
-            return int(shift) in (3, 4)
-        except (TypeError, ValueError):
-            return None
+
+        if shift_recent and parked_shift is not None:
+            return parked_shift
+        return None
 
     @property
     def external_charging_hint(self) -> bool:
@@ -1161,6 +1217,18 @@ class XPengDataCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         parked car awake.
         """
         if not self._last_full_data:
+            return False
+        # A cached charging_state=2 can outlive the actual charging session.
+        # Stop force-uploading once the last real charge frame is ten minutes
+        # old; a restored snapshot or REST widget merge is not fresh MQTT.
+        last_charge = getattr(self, "last_charge_timestamp", None)
+        if last_charge is None:
+            return False
+        try:
+            age = (datetime.now(timezone.utc) - last_charge).total_seconds()
+        except (TypeError, ValueError):
+            return False
+        if age < 0 or age >= 600:
             return False
         content = self._last_full_data.get("msg_content", {})
         if not isinstance(content, dict):

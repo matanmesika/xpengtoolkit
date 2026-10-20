@@ -139,7 +139,18 @@ class XPengSensor(XPengEntity, SensorEntity):
 
     @property
     def native_value(self) -> Any:
-        """Return the sensor value."""
+        """Return the sensor value; prefer live gear/motion over stale cloud mode."""
+        if self.entity_description.key == "vehicle_mode":
+            # XPENG's ext.vehicleMode can remain Standby (1) while an actual
+            # drive is confirmed by the gear/speed stream. Derive Driving
+            # only when that evidence is recent, rather than showing Standby.
+            if self.coordinator.vehicle_parked is False:
+                return "Driving"
+        if self.entity_description.key == "speed":
+            # A fresh P shift must not leave yesterday's interval speed on
+            # the dashboard when XPENG omitted a speed=0 frame at the stop.
+            if self.coordinator.vehicle_parked is True:
+                return 0.0
         raw = self._get_nested_value(self.entity_description.value_path)
         if raw is None:
             return None

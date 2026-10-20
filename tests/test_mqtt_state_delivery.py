@@ -72,10 +72,18 @@ def _stub_paho() -> None:
 
 
 _stub_paho()
-_spec = importlib.util.spec_from_file_location("mqtt_client_delivery", MODULE_PATH)
+# The production module uses a relative import (.location_freshness).
+# Load it inside a minimal fake package so these tests remain standalone
+# without importing the Home Assistant integration package.
+_PACKAGE = "xpeng_mqtt_state_delivery_testpkg"
+_package = types.ModuleType(_PACKAGE)
+_package.__path__ = [str(COMPONENT)]
+sys.modules.setdefault(_PACKAGE, _package)
+_MODULE_NAME = f"{_PACKAGE}.mqtt_client_delivery"
+_spec = importlib.util.spec_from_file_location(_MODULE_NAME, MODULE_PATH)
 assert _spec and _spec.loader
 mqtt_client = importlib.util.module_from_spec(_spec)
-sys.modules["mqtt_client_delivery"] = mqtt_client
+sys.modules[_MODULE_NAME] = mqtt_client
 _spec.loader.exec_module(mqtt_client)
 
 
@@ -140,6 +148,31 @@ class AsleepAckIsNotData(unittest.TestCase):
         client._on_message(None, None, _Msg(_state()))
         self.assertEqual(calls, [])
 
+    def test_repeated_changed_partial_does_not_mask_staleness(self):
+        """A partial changed since FULL must be accepted only once.
+
+        Without advancing the comparison baseline, every identical retry
+        fires the coordinator callback and resets the watchdog's meaningful
+        data timer, even though there is no further change.
+        """
+        client, calls = _client()
+        first = {"charge": {"power": 1200, "electricity": 1}}
+        client._on_message(None, None, _Msg(_state(interval=first)))
+        self.assertEqual(len(calls), 1)
+        accepted_at = client.last_meaningful_state_ts
+        self.assertEqual(client._last_full_content["interval"], first)
+
+        # A repeated stub after that update must not appear as fresh data.
+        client._on_message(None, None, _Msg(_state(interval=first)))
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(client.last_meaningful_state_ts, accepted_at)
+
+        # New telemetry must still flow, including a value returning to zero.
+        second = {"charge": {"power": 0, "electricity": 1}}
+        client._on_message(None, None, _Msg(_state(interval=second)))
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(calls[-1]["msg_content"]["interval"], second)
+
 
 class RealChangesStillArrive(unittest.TestCase):
     def test_a_changed_section_reaches_the_coordinator(self):
@@ -177,6 +210,62 @@ class RealChangesStillArrive(unittest.TestCase):
         )
         self.assertEqual(len(calls), 1)
         self.assertEqual(calls[0]["msg_content"]["interval"]["charge"]["power"], 0)
+
+
+class NarrowPartialMergeKeepsVehicleFields(unittest.TestCase):
+    def test_speed_patch_preserves_last_gps_and_other_sections(self):
+        """A speed-only interval patch must not erase GPS or battery values."""
+        cached = {
+            "code": 200,
+            "instant": {
+                "drive": {"shift_state": 1, "motor_temperature": 33},
+                "charge": {"battery_soc": 50, "charging_state": 0},
+            },
+            "interval": {
+                "drive": {"latitude": 32.12, "longitude": 34.82, "speed": 35},
+                "charge": {"power": 0, "electricity": 2},
+            },
+        }
+        client, calls = _client(cached)
+        client._on_message(None, None, _Msg(_state(
+            instant={"drive": {"shift_state": 3}},
+            interval={"drive": {"speed": 0}},
+        )))
+        self.assertEqual(len(calls), 1)
+        merged = calls[0]["msg_content"]
+        self.assertEqual(merged["interval"]["drive"]["speed"], 0)
+        self.assertEqual(merged["interval"]["drive"]["latitude"], 32.12)
+        self.assertEqual(merged["interval"]["drive"]["longitude"], 34.82)
+        self.assertEqual(merged["interval"]["charge"], cached["interval"]["charge"])
+        self.assertEqual(merged["instant"]["drive"]["shift_state"], 3)
+        self.assertEqual(merged["instant"]["drive"]["motor_temperature"], 33)
+        self.assertEqual(merged["instant"]["charge"]["battery_soc"], 50)
+        self.assertEqual(cached["instant"]["drive"]["shift_state"], 1)
+        self.assertEqual(cached["interval"]["drive"]["speed"], 35)
+
+        # Same partial a second time must not reset the data freshness clock.
+        last = client.last_meaningful_state_ts
+        client._on_message(None, None, _Msg(_state(
+            instant={"drive": {"shift_state": 3}},
+            interval={"drive": {"speed": 0}},
+        )))
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(last, client.last_meaningful_state_ts)
+
+    def test_nested_charge_update_preserves_other_fields(self):
+        """A SOC patch must not make the charge limit disappear."""
+        cached = {"code": 200, "instant": {"charge": {
+            "battery_soc": 55, "charge_limit": 80, "charging_state": 2
+        }}}
+        client, calls = _client(cached)
+        client._on_message(None, None, _Msg(_state(
+            instant={"charge": {"battery_soc": 56}}
+        )))
+        self.assertEqual(len(calls), 1)
+        updated = calls[-1]["msg_content"]["instant"]["charge"]
+        self.assertEqual(updated["battery_soc"], 56)
+        self.assertEqual(updated["charge_limit"], 80)
+        self.assertEqual(updated["charging_state"], 2)
 
 
 class UnsentCommandsAreReported(unittest.TestCase):

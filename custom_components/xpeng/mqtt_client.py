@@ -1240,6 +1240,26 @@ class XPengMQTTClient:
                         instant.get("charge") or instant.get("odometer")
                     ),
                     "has_fresh_location_data": has_fresh_position(content),
+                    "has_fresh_charge_data": (
+                        isinstance(instant.get("charge"), dict)
+                        and bool(instant["charge"])
+                    ) or (
+                        isinstance(content.get("interval"), dict)
+                        and isinstance(content["interval"].get("charge"), dict)
+                        and bool(content["interval"]["charge"])
+                    ),
+                    "has_fresh_shift_data": (
+                        isinstance(instant.get("drive"), dict)
+                        and "shift_state" in instant["drive"]
+                    ),
+                    "has_fresh_speed_data": (
+                        isinstance(instant.get("drive"), dict)
+                        and "speed" in instant["drive"]
+                    ) or (
+                        isinstance(content.get("interval"), dict)
+                        and isinstance(content["interval"].get("drive"), dict)
+                        and "speed" in content["interval"]["drive"]
+                    ),
                 }
                 if self._state_callback is not None:
                     # This is the point where a message stops being a ping and
@@ -1248,16 +1268,28 @@ class XPengMQTTClient:
                     self._last_meaningful_state_ts = time.time()
                     self._state_callback(vehicle_data)
             elif self._last_full_content is not None:
-                # Partial response — merge non-empty instant sections into last
-                # full state so sensors update with whatever data the car sent.
+                # Partial response — merge non-empty instant sections into the
+                # last accepted state so identical retries are not new data.
                 merged = dict(self._last_full_content)
-                merged_instant = dict(merged.get("instant", {}))
-                for key, val in instant.items():
-                    if val:
-                        merged_instant[key] = val
-                merged["instant"] = merged_instant
-                if "interval" in content:
-                    merged["interval"] = content["interval"]
+                # XPENG sends narrow interval/instant patches (for example,
+                # interval.drive.speed only). Replacing an entire section with
+                # such a patch drops GPS, odometer or charge fields that did
+                # not change. Merge per subsection and per field instead.
+                for section in ("instant", "interval"):
+                    patch = content.get(section)
+                    if not isinstance(patch, dict):
+                        continue
+                    previous = merged.get(section)
+                    result = dict(previous) if isinstance(previous, dict) else {}
+                    for key, val in patch.items():
+                        if val == {}:
+                            continue  # an empty update is not a deletion
+                        old = result.get(key)
+                        if isinstance(old, dict) and isinstance(val, dict):
+                            result[key] = {**old, **val}
+                        else:
+                            result[key] = val
+                    merged[section] = result
                 if "digital_vehicle" in content:
                     merged["digital_vehicle"] = content["digital_vehicle"]
 
@@ -1283,10 +1315,15 @@ class XPengMQTTClient:
                     )
                     return
                 _LOGGER.debug(
-                    "Partial state (%dB, keys=%s) — merged with last full state",
+                    "Partial state (%dB, keys=%s) — merged with last accepted state",
                     payload_len,
                     list(instant.keys()),
                 )
+                # Keep the comparison baseline in sync with what was accepted.
+                # Without this, the same short partial differs from the last
+                # FULL state on every retry, masquerading as fresh telemetry and
+                # preventing the silence watchdog from escalating.
+                self._last_full_content = merged
                 vehicle_data = {
                     "vin": data.get("target_id", ""),
                     "msg_content": merged,
@@ -1299,6 +1336,26 @@ class XPengMQTTClient:
                         instant.get("charge") or instant.get("odometer")
                     ),
                     "has_fresh_location_data": has_fresh_position(content),
+                    "has_fresh_charge_data": (
+                        isinstance(instant.get("charge"), dict)
+                        and bool(instant["charge"])
+                    ) or (
+                        isinstance(content.get("interval"), dict)
+                        and isinstance(content["interval"].get("charge"), dict)
+                        and bool(content["interval"]["charge"])
+                    ),
+                    "has_fresh_shift_data": (
+                        isinstance(instant.get("drive"), dict)
+                        and "shift_state" in instant["drive"]
+                    ),
+                    "has_fresh_speed_data": (
+                        isinstance(instant.get("drive"), dict)
+                        and "speed" in instant["drive"]
+                    ) or (
+                        isinstance(content.get("interval"), dict)
+                        and isinstance(content["interval"].get("drive"), dict)
+                        and "speed" in content["interval"]["drive"]
+                    ),
                 }
                 if self._state_callback is not None:
                     # This is the point where a message stops being a ping and
