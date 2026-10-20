@@ -901,13 +901,15 @@ class XPengMQTTClient:
             entry["result"] = data
             entry["event"].set()
 
-    def send_query(self, vin: str) -> None:
-        """Publish a vehicle state query."""
+    def send_query(self, vin: str) -> bool:
+        """Publish a passive state query and report actual broker submission."""
         if not self._client or not self._connected:
             _LOGGER.debug("Cannot send query: not connected")
-            return
-        self.send_command(vin, service_type=19, msg_content={}, msg_type=4)
-        _LOGGER.debug("Published state query for VIN %s", vin)
+            return False
+        sent = self.send_command(vin, service_type=19, msg_content={}, msg_type=4)
+        if sent:
+            _LOGGER.debug("Published state query for VIN %s", vin)
+        return sent
 
     # ── Listener topic subscription ──────────────────────────
 
