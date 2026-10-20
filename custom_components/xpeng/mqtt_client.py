@@ -1240,6 +1240,10 @@ class XPengMQTTClient:
                         instant.get("charge") or instant.get("odometer")
                     ),
                     "has_fresh_location_data": has_fresh_position(content),
+                    "has_fresh_mode_data": (
+                        isinstance(instant.get("ext"), dict)
+                        and "vehicleMode" in instant["ext"]
+                    ),
                     "has_fresh_charge_data": (
                         isinstance(instant.get("charge"), dict)
                         and bool(instant["charge"])
@@ -1336,6 +1340,10 @@ class XPengMQTTClient:
                         instant.get("charge") or instant.get("odometer")
                     ),
                     "has_fresh_location_data": has_fresh_position(content),
+                    "has_fresh_mode_data": (
+                        isinstance(instant.get("ext"), dict)
+                        and "vehicleMode" in instant["ext"]
+                    ),
                     "has_fresh_charge_data": (
                         isinstance(instant.get("charge"), dict)
                         and bool(instant["charge"])
