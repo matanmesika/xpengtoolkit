@@ -26,7 +26,7 @@ def age_seconds(timestamp: datetime | None, now: datetime) -> int | None:
 
 def classify(
     *,
-    connected: bool,
+    connected: bool | None,
     restored: bool,
     data_age: float | None,
     parked: bool | None,
@@ -35,10 +35,12 @@ def classify(
     stale_after: float = STALE_AFTER_SECONDS,
 ) -> str:
     """Current evidence; neither 'Sleep' nor 'Awake' can be proved remotely."""
-    if not connected:
+    if connected is False:
         return "Disconnected"
     if restored:
         return "Cached"
+    if connected is None:
+        return "Unknown"
     if data_age is None or data_age >= stale_after:
         return "Silent"
     if parked is False:
