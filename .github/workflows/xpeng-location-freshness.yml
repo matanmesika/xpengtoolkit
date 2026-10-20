@@ -12,6 +12,7 @@ on:
       - custom_components/xpeng/device_tracker.py
       - tests/test_location_freshness.py
       - tests/test_mqtt_state_delivery.py
+      - tests/test_motion_cadence.py
       - .github/workflows/xpeng-location-freshness.yml
   workflow_dispatch:
 
@@ -41,5 +42,6 @@ jobs:
           python -m py_compile custom_components/xpeng/device_tracker.py
           python -m py_compile tests/test_location_freshness.py
           python -m py_compile tests/test_mqtt_state_delivery.py
+          python -m py_compile tests/test_motion_cadence.py
       - name: Run GPS / MQTT regression tests
-        run: python -m pytest -q tests/test_location_freshness.py tests/test_mqtt_state_delivery.py
+        run: python -m pytest -q tests/test_location_freshness.py tests/test_mqtt_state_delivery.py tests/test_motion_cadence.py
