@@ -133,6 +133,7 @@ class XPengDataCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # ORIGINAL MQTT frame, never by cached fields or REST widget merges.
         self.last_shift_timestamp: datetime | None = None
         self.last_speed_timestamp: datetime | None = None
+        self.last_charge_timestamp: datetime | None = None
         # True while the only state we hold was restored from disk (no live
         # push received yet this session).
         self.state_is_restored: bool = False
@@ -320,6 +321,7 @@ class XPengDataCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         has_fresh_location_data = data.pop("has_fresh_location_data", False)
         has_fresh_shift_data = data.pop("has_fresh_shift_data", False)
         has_fresh_speed_data = data.pop("has_fresh_speed_data", False)
+        has_fresh_charge_data = data.pop("has_fresh_charge_data", False)
         self._last_full_data = data
         self.last_data_timestamp = datetime.now(timezone.utc)
         if has_fresh_energy_data:
@@ -330,6 +332,8 @@ class XPengDataCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             self.last_shift_timestamp = self.last_data_timestamp
         if has_fresh_speed_data:
             self.last_speed_timestamp = self.last_data_timestamp
+        if has_fresh_charge_data:
+            self.last_charge_timestamp = self.last_data_timestamp
         self.state_is_restored = False
         # Update the parked-drain estimate before notifying entities (reads the
         # freshly-set _last_full_data via vehicle_parked / is_charging).
@@ -1213,6 +1217,18 @@ class XPengDataCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         parked car awake.
         """
         if not self._last_full_data:
+            return False
+        # A cached charging_state=2 can outlive the actual charging session.
+        # Stop force-uploading once the last real charge frame is ten minutes
+        # old; a restored snapshot or REST widget merge is not fresh MQTT.
+        last_charge = getattr(self, "last_charge_timestamp", None)
+        if last_charge is None:
+            return False
+        try:
+            age = (datetime.now(timezone.utc) - last_charge).total_seconds()
+        except (TypeError, ValueError):
+            return False
+        if age < 0 or age >= 600:
             return False
         content = self._last_full_data.get("msg_content", {})
         if not isinstance(content, dict):
