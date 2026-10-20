@@ -902,13 +902,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     # Wire MQTT -> coordinator (with parked→driving transition detection)
     def _on_vehicle_state(data: dict[str, Any]) -> None:
-        was_parked = coordinator.vehicle_parked
-        hass.loop.call_soon_threadsafe(
-            _handle_vehicle_state, data, was_parked
-        )
+        # The callback runs on the paho thread. Never sample coordinator state
+        # here: a burst of queued messages could all capture the same old
+        # parked value and emit multiple false parked->driving transitions.
+        hass.loop.call_soon_threadsafe(_handle_vehicle_state, data)
 
-    def _handle_vehicle_state(data: dict[str, Any], was_parked: bool | None) -> None:
-        """Update coordinator and handle parked→driving transition."""
+    def _handle_vehicle_state(data: dict[str, Any]) -> None:
+        """Compare consecutive observations ON the Home Assistant event loop."""
+        was_parked = coordinator.vehicle_parked
         coordinator.set_vehicle_data(data)
         # If car just started moving, force immediate query
         if was_parked and coordinator.vehicle_parked is False:
