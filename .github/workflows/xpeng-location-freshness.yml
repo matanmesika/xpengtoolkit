@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - fix/live-location-freshness
+      - beta/telemetry-state-audit-20261020
   pull_request:
     paths:
       - 'custom_components/xpeng/**'
@@ -46,7 +47,7 @@ jobs:
       - name: Run whole integration regression suite
         run: python -m unittest discover -s tests -v
       - name: Package side-test beta (only after tests pass)
-        if: github.event_name == 'pull_request' && github.head_ref == 'beta/telemetry-state-audit-20261020' && matrix.python-version == '3.13'
+        if: (github.head_ref == 'beta/telemetry-state-audit-20261020' || github.ref_name == 'beta/telemetry-state-audit-20261020') && matrix.python-version == '3.13'
         run: |
           mkdir -p beta-build/custom_components
           cp -a custom_components/xpeng beta-build/custom_components/
@@ -54,7 +55,7 @@ jobs:
           (cd beta-build && zip -qr ../XPENG-Toolkit-0.6.18b2.zip custom_components)
           unzip -l XPENG-Toolkit-0.6.18b2.zip | head -25
       - name: Upload side-test package
-        if: github.event_name == 'pull_request' && github.head_ref == 'beta/telemetry-state-audit-20261020' && matrix.python-version == '3.13'
+        if: (github.head_ref == 'beta/telemetry-state-audit-20261020' || github.ref_name == 'beta/telemetry-state-audit-20261020') && matrix.python-version == '3.13'
         uses: actions/upload-artifact@v4
         with:
           name: XPENG-Toolkit-0.6.18b2
