@@ -1,0 +1,36 @@
+name: XPENG primary MQTT capture
+
+on:
+  push:
+    branches:
+      - fix/capture-primary-vehicle-mqtt
+  pull_request:
+    paths:
+      - custom_components/xpeng/__init__.py
+      - custom_components/xpeng/mqtt_client.py
+      - tests/test_primary_mqtt_capture.py
+      - .github/workflows/xpeng-primary-capture.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  capture:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ['3.13', '3.14']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python-version }}
+      - run: python -m pip install 'paho-mqtt>=2,<3'
+      - name: Compile modified source and tests
+        run: |
+          python -m py_compile custom_components/xpeng/__init__.py custom_components/xpeng/mqtt_client.py custom_components/xpeng/capture.py
+          python -m py_compile tests/test_primary_mqtt_capture.py
+      - name: Capture primary and V2 MQTT state frames
+        run: python -m unittest discover -s tests -p test_primary_mqtt_capture.py -v
