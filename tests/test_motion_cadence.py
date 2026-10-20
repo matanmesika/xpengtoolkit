@@ -142,21 +142,34 @@ def test_charge_timestamp_is_only_refreshed_by_charge_telemetry():
     assert state.last_charge_timestamp > old
 
 
-def test_vehicle_mode_and_speed_sensors_use_verified_motion():
+def test_raw_mode_remains_raw_while_speed_and_gps_expire():
     native_value = method("native_value", filename="sensor.py",
                           class_name="XPengSensor")
-    def reading(key, parked, raw, converter=lambda v: v):
+    now = datetime.now(timezone.utc)
+    def reading(key, parked, raw, *, age=2, restored=False, converter=lambda v: v):
+        stamp = now - timedelta(seconds=age) if age is not None else None
+        coord = SimpleNamespace(
+            vehicle_parked=parked, last_mode_timestamp=stamp,
+            last_speed_timestamp=stamp, last_shift_timestamp=stamp,
+            last_location_timestamp=stamp, state_is_restored=restored,
+        )
         obj = SimpleNamespace(
-            coordinator=SimpleNamespace(vehicle_parked=parked),
+            coordinator=coord,
             entity_description=SimpleNamespace(
-                key=key, value_path="any", value_fn=converter
-            ),
+                key=key, value_path="any", value_fn=converter),
             _get_nested_value=lambda _: raw,
         )
         return native_value(obj)
 
-    assert reading("vehicle_mode", False, 1, lambda _: "Standby") == "Driving"
-    assert reading("vehicle_mode", True, 1, lambda _: "Standby") == "Standby"
-    assert reading("speed", True, 117, float) == 0.0
-    assert reading("speed", False, 42, float) == 42.0
-    assert reading("speed", None, None, float) is None
+    # Cloud Standby remains the raw observation. The derived diagnostic
+    # (tested separately) should say Driving when recent motion proves it.
+    assert reading("vehicle_mode", False, 1, converter=lambda _: "Standby") == "Standby"
+    assert reading("speed", True, 117, converter=float) == 0.0
+    assert reading("speed", False, 42, converter=float) == 42.0
+    assert reading("speed", False, 42, age=601, converter=float) is None
+    assert reading("shift_state", False, 1, age=601) is None
+    assert reading("vehicle_mode", False, 1, age=901) is None
+    assert reading("latitude", None, 32.1, age=901) is None
+    assert reading("longitude", None, 34.8, age=3) == 34.8
+    assert reading("latitude", None, 32.1, restored=True) is None
+    assert reading("speed", None, None, converter=float) is None
