@@ -1248,6 +1248,18 @@ class XPengMQTTClient:
                         isinstance(instant.get("ext"), dict)
                         and "vehicleMode" in instant["ext"]
                     ),
+                    # Stamp the actual source fields independently:
+                    # a new zero-power packet must not refresh an older
+                    # charging_state=2 (or vice versa).
+                    "has_fresh_charge_state_data": (
+                        isinstance(instant.get("charge"), dict)
+                        and "charging_state" in instant["charge"]
+                    ),
+                    "has_fresh_charge_power_data": (
+                        isinstance(content.get("interval"), dict)
+                        and isinstance(content["interval"].get("charge"), dict)
+                        and "power" in content["interval"]["charge"]
+                    ),
                     "has_fresh_charge_data": (
                         isinstance(instant.get("charge"), dict)
                         and bool(instant["charge"])
@@ -1348,6 +1360,18 @@ class XPengMQTTClient:
                         isinstance(instant.get("ext"), dict)
                         and "vehicleMode" in instant["ext"]
                     ),
+                    # Stamp the actual source fields independently:
+                    # a new zero-power packet must not refresh an older
+                    # charging_state=2 (or vice versa).
+                    "has_fresh_charge_state_data": (
+                        isinstance(instant.get("charge"), dict)
+                        and "charging_state" in instant["charge"]
+                    ),
+                    "has_fresh_charge_power_data": (
+                        isinstance(content.get("interval"), dict)
+                        and isinstance(content["interval"].get("charge"), dict)
+                        and "power" in content["interval"]["charge"]
+                    ),
                     "has_fresh_charge_data": (
                         isinstance(instant.get("charge"), dict)
                         and bool(instant["charge"])
@@ -1417,6 +1441,8 @@ class XPengMQTTClient:
                     ),
                     "has_fresh_shift_data": has_shift,
                     "has_fresh_speed_data": has_speed,
+                    "has_fresh_charge_state_data": "charging_state" in charge,
+                    "has_fresh_charge_power_data": "power" in interval_charge,
                     "has_fresh_charge_data": bool(charge or interval_charge),
                 }
                 if self._state_callback is not None:
