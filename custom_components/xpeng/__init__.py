@@ -900,6 +900,41 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # which is precisely what the credential-age sensor is read to rule out.
     # It reads "Unknown" for the seconds until the first refresh cycle lands.
 
+    # Seed query timing before MQTT callbacks are registered. A quick response
+    # can be delivered while setup is still awaiting the broker connection.
+    query_timer_state: dict[str, float] = {
+        "last_sent": time.time(),
+        "last_transition_request": 0.0,
+    }
+
+    async def _request_transition_full_state() -> None:
+        """Prompt one full snapshot when a *real* new drive signal arrives.
+
+        A passive query is not sufficient to recover a stuck cloud fanout.
+        Bound this immediate nudge (including failed sends) to avoid bursts
+        when the gear rapidly toggles P/R/D; subsequent active polling keeps
+        the existing configured cadence.
+        """
+        now = time.time()
+        if now - query_timer_state["last_transition_request"] < 20:
+            return
+        query_timer_state["last_transition_request"] = now
+        try:
+            sent = await hass.async_add_executor_job(
+                mqtt_client.send_command, vin, 19, {"cmd_type": 2}, 2
+            )
+        except Exception:
+            _LOGGER.warning("Driving-transition force-upload failed", exc_info=True)
+            sent = False
+        if sent:
+            query_timer_state["last_sent"] = time.time()
+            coordinator.set_poll_status(
+                last_query_at=time.time(),
+                last_query_kind="transition_force_upload",
+            )
+        else:
+            coordinator.set_poll_status(last_query_failed_at=time.time())
+
     # Wire MQTT -> coordinator (with parked→driving transition detection)
     def _on_vehicle_state(data: dict[str, Any]) -> None:
         # The callback runs on the paho thread. Never sample coordinator state
@@ -910,13 +945,20 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     def _handle_vehicle_state(data: dict[str, Any]) -> None:
         """Compare consecutive observations ON the Home Assistant event loop."""
         was_parked = coordinator.vehicle_parked
+        # Inspect the original packet BEFORE the coordinator consumes flags.
+        actual_motion_frame = bool(
+            data.get("has_fresh_shift_data") or data.get("has_fresh_speed_data")
+        )
         coordinator.set_vehicle_data(data)
-        # If car just started moving, force immediate query
-        if was_parked and coordinator.vehicle_parked is False:
-            _LOGGER.info("Vehicle transitioned from parked to driving — forcing query")
-            # async_add_executor_job already schedules the job and returns a
-            # Future — do NOT wrap it in async_create_task (expects a coroutine).
-            hass.async_add_executor_job(mqtt_client.send_query, vin)
+        # Previous state can be Unknown after hours of sleep. A fresh D/R
+        # frame or signed moving speed is valid evidence in either case.
+        if (was_parked is not False and coordinator.vehicle_parked is False
+                and actual_motion_frame):
+            if coordinator.command_policy.can_wake():
+                _LOGGER.info("New driving signal after parked/unknown — requesting full state")
+                hass.async_create_task(_request_transition_full_state())
+            else:
+                _LOGGER.debug("Driving transition seen; automatic wake prohibited by policy")
 
     mqtt_client.set_state_callback(_on_vehicle_state)
 
@@ -1131,12 +1173,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # re-runs — we must NOT wake the car then, so we send only the passive
     # state query (msg_type=4), which a sleeping car answers with a ~248-byte
     # stub without waking. The periodic timer and watchdog never wake the car.
-    query_timer_state: dict[str, float] = {"last_sent": time.time()}
     if not hass.is_running and coordinator.command_policy.can_wake():
         _LOGGER.info("Cold start — one force-upload to wake the car for a full snapshot")
-        await hass.async_add_executor_job(
+        initial_sent = await hass.async_add_executor_job(
             mqtt_client.send_command, vin, 19, {"cmd_type": 2}, 2
         )
+        if initial_sent:
+            query_timer_state["last_transition_request"] = time.time()
     elif not hass.is_running:
         # Cold start with waking switched off (command permissions ->
         # "allow wake"): a passive query still refreshes what the car will
