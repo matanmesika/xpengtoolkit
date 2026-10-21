@@ -1187,9 +1187,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     }
 
     # 5. Initial query.
-    # On a genuine HA restart (hass not yet running) we send ONE cmd_type:2
-    # force-upload to wake the car, so every boot captures a full state snapshot
-    # into the persisted cache and serves a complete sensor set. On an
+    # On a genuine HA restart (hass not yet running) one cmd_type:2
+    # force-upload may be sent if MQTT is connected, permission permits it,
+    # and the durable 12h automatic-wake cooldown is clear. Otherwise we
+    # preserve battery and avoid claiming to hold a fresh vehicle snapshot. On an
     # integration reload / options change (hass already running) this function
     # re-runs — we must NOT wake the car then, so we send only the passive
     # state query (msg_type=4), which a sleeping car answers with a ~248-byte
@@ -1203,6 +1204,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 (now_ts - last_wake) / 60,
             )
             await hass.async_add_executor_job(mqtt_client.send_query, vin)
+        elif not mqtt_client.connected:
+            # connect() can time out after 10 seconds without a CONNACK.
+            # There is no wake to reserve if no MQTT publish is possible.
+            # Watchdog/reconnect can recover without being blocked for 12h.
+            _LOGGER.warning(
+                "Cold start: MQTT is offline; no automatic-wake quota spent"
+            )
         else:
             # Reserve the budget BEFORE attempting the command; the same
             # policy bounds repeated failed sends as repeated successful ones.
