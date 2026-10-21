@@ -5,6 +5,7 @@ import ast
 from datetime import datetime, timedelta, timezone
 import importlib.util
 import logging
+import math
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -136,7 +137,7 @@ def test_transition_sequence_only_counts_real_gear_flips():
     # Remove @property because methods are compiled outside the coordinator.
     for node in code.body[1:]:
         node.decorator_list = []
-    env = {"datetime": datetime, "timezone": timezone, "_LOGGER": logging.getLogger(__name__)}
+    env = {"datetime": datetime, "timezone": timezone, "math": math, "_LOGGER": logging.getLogger(__name__)}
     exec(compile(ast.fix_missing_locations(code), str(ROOT / "coordinator.py"), "exec"), env)
 
     class Coordinator:
