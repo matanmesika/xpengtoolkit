@@ -144,9 +144,9 @@ def test_charging_cadence_expires_stale_charge_samples(
 
 @pytest.mark.parametrize("state,watts,state_age,power_age,expected", [
     (2, 0, 5, 2, False),    # latest 0W overrides prior charging state
-    (1, 2100, 2, 5, True), # latest power confirms charging
+    (1, 2100, 2, 5, False),# newer state reports not charging
     (2, 0, 2, 5, True),    # latest state confirms charging despite old zero power
-    (1, 2100, 5, 2, False),# newer not-charging status overrides old charge
+    (1, 2100, 5, 2, True), # newer charging power overrides older state
     (2, 0, 2, None, True), # only status received
     (1, 2100, None, 2, True), # only power received
     (2, 2100, 601, 601, False), # both stale
