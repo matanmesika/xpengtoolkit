@@ -901,13 +901,15 @@ class XPengMQTTClient:
             entry["result"] = data
             entry["event"].set()
 
-    def send_query(self, vin: str) -> None:
-        """Publish a vehicle state query."""
+    def send_query(self, vin: str) -> bool:
+        """Publish a passive state query and report actual broker submission."""
         if not self._client or not self._connected:
             _LOGGER.debug("Cannot send query: not connected")
-            return
-        self.send_command(vin, service_type=19, msg_content={}, msg_type=4)
-        _LOGGER.debug("Published state query for VIN %s", vin)
+            return False
+        sent = self.send_command(vin, service_type=19, msg_content={}, msg_type=4)
+        if sent:
+            _LOGGER.debug("Published state query for VIN %s", vin)
+        return sent
 
     # ── Listener topic subscription ──────────────────────────
 
@@ -1205,6 +1207,8 @@ class XPengMQTTClient:
                 return
 
             instant = content.get("instant", {})
+            if not isinstance(instant, dict):
+                instant = {}
             # A true full state has ext + sufficient other sections.
             # We require ext (vehicle mode/sentinel/etc.) plus at least one
             # of: charge, drive, power, odometer, door — this handles both
@@ -1240,6 +1244,42 @@ class XPengMQTTClient:
                         instant.get("charge") or instant.get("odometer")
                     ),
                     "has_fresh_location_data": has_fresh_position(content),
+                    "has_fresh_mode_data": (
+                        isinstance(instant.get("ext"), dict)
+                        and "vehicleMode" in instant["ext"]
+                    ),
+                    # Stamp the actual source fields independently:
+                    # a new zero-power packet must not refresh an older
+                    # charging_state=2 (or vice versa).
+                    "has_fresh_charge_state_data": (
+                        isinstance(instant.get("charge"), dict)
+                        and "charging_state" in instant["charge"]
+                    ),
+                    "has_fresh_charge_power_data": (
+                        isinstance(content.get("interval"), dict)
+                        and isinstance(content["interval"].get("charge"), dict)
+                        and "power" in content["interval"]["charge"]
+                    ),
+                    "has_fresh_charge_data": (
+                        isinstance(instant.get("charge"), dict)
+                        and bool(instant["charge"])
+                    ) or (
+                        isinstance(content.get("interval"), dict)
+                        and isinstance(content["interval"].get("charge"), dict)
+                        and bool(content["interval"]["charge"])
+                    ),
+                    "has_fresh_shift_data": (
+                        isinstance(instant.get("drive"), dict)
+                        and "shift_state" in instant["drive"]
+                    ),
+                    "has_fresh_speed_data": (
+                        isinstance(instant.get("drive"), dict)
+                        and "speed" in instant["drive"]
+                    ) or (
+                        isinstance(content.get("interval"), dict)
+                        and isinstance(content["interval"].get("drive"), dict)
+                        and "speed" in content["interval"]["drive"]
+                    ),
                 }
                 if self._state_callback is not None:
                     # This is the point where a message stops being a ping and
@@ -1248,16 +1288,28 @@ class XPengMQTTClient:
                     self._last_meaningful_state_ts = time.time()
                     self._state_callback(vehicle_data)
             elif self._last_full_content is not None:
-                # Partial response — merge non-empty instant sections into last
-                # full state so sensors update with whatever data the car sent.
+                # Partial response — merge non-empty instant sections into the
+                # last accepted state so identical retries are not new data.
                 merged = dict(self._last_full_content)
-                merged_instant = dict(merged.get("instant", {}))
-                for key, val in instant.items():
-                    if val:
-                        merged_instant[key] = val
-                merged["instant"] = merged_instant
-                if "interval" in content:
-                    merged["interval"] = content["interval"]
+                # XPENG sends narrow interval/instant patches (for example,
+                # interval.drive.speed only). Replacing an entire section with
+                # such a patch drops GPS, odometer or charge fields that did
+                # not change. Merge per subsection and per field instead.
+                for section in ("instant", "interval"):
+                    patch = content.get(section)
+                    if not isinstance(patch, dict):
+                        continue
+                    previous = merged.get(section)
+                    result = dict(previous) if isinstance(previous, dict) else {}
+                    for key, val in patch.items():
+                        if val is None or val == {}:
+                            continue  # a null/empty patch is not a deletion
+                        old = result.get(key)
+                        if isinstance(old, dict) and isinstance(val, dict):
+                            result[key] = {**old, **val}
+                        else:
+                            result[key] = val
+                    merged[section] = result
                 if "digital_vehicle" in content:
                     merged["digital_vehicle"] = content["digital_vehicle"]
 
@@ -1283,10 +1335,15 @@ class XPengMQTTClient:
                     )
                     return
                 _LOGGER.debug(
-                    "Partial state (%dB, keys=%s) — merged with last full state",
+                    "Partial state (%dB, keys=%s) — merged with last accepted state",
                     payload_len,
                     list(instant.keys()),
                 )
+                # Keep the comparison baseline in sync with what was accepted.
+                # Without this, the same short partial differs from the last
+                # FULL state on every retry, masquerading as fresh telemetry and
+                # preventing the silence watchdog from escalating.
+                self._last_full_content = merged
                 vehicle_data = {
                     "vin": data.get("target_id", ""),
                     "msg_content": merged,
@@ -1299,6 +1356,42 @@ class XPengMQTTClient:
                         instant.get("charge") or instant.get("odometer")
                     ),
                     "has_fresh_location_data": has_fresh_position(content),
+                    "has_fresh_mode_data": (
+                        isinstance(instant.get("ext"), dict)
+                        and "vehicleMode" in instant["ext"]
+                    ),
+                    # Stamp the actual source fields independently:
+                    # a new zero-power packet must not refresh an older
+                    # charging_state=2 (or vice versa).
+                    "has_fresh_charge_state_data": (
+                        isinstance(instant.get("charge"), dict)
+                        and "charging_state" in instant["charge"]
+                    ),
+                    "has_fresh_charge_power_data": (
+                        isinstance(content.get("interval"), dict)
+                        and isinstance(content["interval"].get("charge"), dict)
+                        and "power" in content["interval"]["charge"]
+                    ),
+                    "has_fresh_charge_data": (
+                        isinstance(instant.get("charge"), dict)
+                        and bool(instant["charge"])
+                    ) or (
+                        isinstance(content.get("interval"), dict)
+                        and isinstance(content["interval"].get("charge"), dict)
+                        and bool(content["interval"]["charge"])
+                    ),
+                    "has_fresh_shift_data": (
+                        isinstance(instant.get("drive"), dict)
+                        and "shift_state" in instant["drive"]
+                    ),
+                    "has_fresh_speed_data": (
+                        isinstance(instant.get("drive"), dict)
+                        and "speed" in instant["drive"]
+                    ) or (
+                        isinstance(content.get("interval"), dict)
+                        and isinstance(content["interval"].get("drive"), dict)
+                        and "speed" in content["interval"]["drive"]
+                    ),
                 }
                 if self._state_callback is not None:
                     # This is the point where a message stops being a ping and
@@ -1307,10 +1400,54 @@ class XPengMQTTClient:
                     self._last_meaningful_state_ts = time.time()
                     self._state_callback(vehicle_data)
             else:
-                _LOGGER.debug(
-                    "Minimal response (no prior data), %d bytes — ignoring",
-                    payload_len,
+                # A fresh integration may first hear a narrow drive/GPS/charge
+                # update, particularly if cloud full-state fanout is stalled.
+                # Do not discard that real evidence solely because we have
+                # not received an ext-bearing full snapshot yet. Reject tiny
+                # acknowledgements without a useful field.
+                interval = content.get("interval")
+                interval = interval if isinstance(interval, dict) else {}
+                idrive = instant.get("drive")
+                idrive = idrive if isinstance(idrive, dict) else {}
+                interval_drive = interval.get("drive")
+                interval_drive = interval_drive if isinstance(interval_drive, dict) else {}
+                charge = instant.get("charge")
+                charge = charge if isinstance(charge, dict) else {}
+                interval_charge = interval.get("charge")
+                interval_charge = interval_charge if isinstance(interval_charge, dict) else {}
+                has_shift = "shift_state" in idrive
+                has_speed = "speed" in idrive or "speed" in interval_drive
+                has_position = has_fresh_position(content)
+                has_charge = any(
+                    k in charge for k in ("battery_soc", "charging_state", "charge_power")
+                ) or "power" in interval_charge
+                if not (has_shift or has_speed or has_position or has_charge):
+                    _LOGGER.debug("Minimal response (no prior data), %dB — ignoring",
+                                  payload_len)
+                    return
+                _LOGGER.info(
+                    "Initial partial state (%dB): speed=%s shift=%s GPS=%s charge=%s",
+                    payload_len, has_speed, has_shift, has_position, has_charge,
                 )
+                self._last_full_content = content
+                vehicle_data = {
+                    "vin": data.get("target_id", ""),
+                    "msg_content": content,
+                    "has_fresh_energy_data": bool(charge or instant.get("odometer")),
+                    "has_fresh_location_data": has_position,
+                    "has_fresh_mode_data": (
+                        isinstance(instant.get("ext"), dict)
+                        and "vehicleMode" in instant["ext"]
+                    ),
+                    "has_fresh_shift_data": has_shift,
+                    "has_fresh_speed_data": has_speed,
+                    "has_fresh_charge_state_data": "charging_state" in charge,
+                    "has_fresh_charge_power_data": "power" in interval_charge,
+                    "has_fresh_charge_data": bool(charge or interval_charge),
+                }
+                if self._state_callback is not None:
+                    self._last_meaningful_state_ts = time.time()
+                    self._state_callback(vehicle_data)
 
         except Exception:
             _LOGGER.exception("Error parsing XPENG MQTT message")
