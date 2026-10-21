@@ -1165,6 +1165,27 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         _LOGGER.error("MQTT connect error: %s", err)
         _LOGGER.warning("Will retry in background via paho reconnect")
 
+    # Shared wake budget: cold starts and the watchdog must respect the SAME
+    # durable cooldown. Otherwise every HA reboot wakes a parked car even
+    # minutes after a prior watchdog wake (or another cold start).
+    watchdog_store: Store = Store(
+        hass, _WATCHDOG_STORE_VERSION, f"{DOMAIN}_watchdog_{vin}"
+    )
+    try:
+        saved_watchdog: dict[str, Any] = await watchdog_store.async_load() or {}
+    except Exception:  # noqa: BLE001 - a bad store must not block setup
+        _LOGGER.warning(
+            "Could not read the watchdog store; the escalation clock starts over",
+            exc_info=True,
+        )
+        saved_watchdog = {}
+    watchdog_state: dict[str, float] = {
+        "last_reconnect": 0.0,
+        "tick_count": 0,
+        "last_escalation": float(saved_watchdog.get("last_escalation") or 0.0),
+        "escalations": 0,
+    }
+
     # 5. Initial query.
     # On a genuine HA restart (hass not yet running) we send ONE cmd_type:2
     # force-upload to wake the car, so every boot captures a full state snapshot
@@ -1174,12 +1195,28 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # state query (msg_type=4), which a sleeping car answers with a ~248-byte
     # stub without waking. The periodic timer and watchdog never wake the car.
     if not hass.is_running and coordinator.command_policy.can_wake():
-        _LOGGER.info("Cold start — one force-upload to wake the car for a full snapshot")
-        initial_sent = await hass.async_add_executor_job(
-            mqtt_client.send_command, vin, 19, {"cmd_type": 2}, 2
-        )
-        if initial_sent:
-            query_timer_state["last_transition_request"] = time.time()
+        now_ts = time.time()
+        last_wake = watchdog_state["last_escalation"]
+        if last_wake and now_ts - last_wake < ESCALATE_BACKOFF_SECONDS:
+            _LOGGER.info(
+                "Cold start: passive query only; last automatic wake %.0f minutes ago",
+                (now_ts - last_wake) / 60,
+            )
+            await hass.async_add_executor_job(mqtt_client.send_query, vin)
+        else:
+            # Reserve the budget BEFORE attempting the command; the same
+            # policy bounds repeated failed sends as repeated successful ones.
+            watchdog_state["last_escalation"] = now_ts
+            try:
+                await watchdog_store.async_save({"last_escalation": now_ts})
+            except Exception:
+                _LOGGER.warning("Unable to persist cold-start wake budget", exc_info=True)
+            _LOGGER.info("Cold start — budgeted force-upload for full snapshot")
+            initial_sent = await hass.async_add_executor_job(
+                mqtt_client.send_command, vin, 19, {"cmd_type": 2}, 2
+            )
+            if initial_sent:
+                query_timer_state["last_transition_request"] = time.time()
     elif not hass.is_running:
         # Cold start with waking switched off (command permissions ->
         # "allow wake"): a passive query still refreshes what the car will
@@ -1536,23 +1573,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # — one hour after the previous wake, not twelve. The session counters reset
     # with the session (that is what "this session" means); the backoff clock is
     # a promise about the car, so it is stored.
-    watchdog_store: Store = Store(
-        hass, _WATCHDOG_STORE_VERSION, f"{DOMAIN}_watchdog_{vin}"
-    )
-    try:
-        saved_watchdog: dict[str, Any] = await watchdog_store.async_load() or {}
-    except Exception:  # noqa: BLE001 - a bad store must not block setup
-        _LOGGER.warning(
-            "Could not read the watchdog store; the escalation clock starts over",
-            exc_info=True,
-        )
-        saved_watchdog = {}
-    watchdog_state: dict[str, float] = {
-        "last_reconnect": 0.0,
-        "tick_count": 0,
-        "last_escalation": float(saved_watchdog.get("last_escalation") or 0.0),
-        "escalations": 0,
-    }
+    # Watchdog state and persisted wake clock were loaded before cold-start polling.
     SILENCE_THRESHOLD = 300  # silence this long with socket up → suspect stuck
     RECONNECT_BACKOFF = 600  # active/charging: the car is awake, reconnects are cheap
     # Parked, a reconnect is close to pointless and not free: the car answers a
