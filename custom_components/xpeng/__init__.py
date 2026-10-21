@@ -916,9 +916,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         the existing configured cadence.
         """
         now = time.time()
-        if now - query_timer_state["last_transition_request"] < 20:
+        # P/Driving observations can oscillate when XPENG sends a cached P
+        # alongside live speed frames. Do not trigger another full upload for
+        # every such inference while the normal active poll is already running.
+        if now - query_timer_state["last_transition_request"] < 120:
+            _LOGGER.debug("Repeated driving-trigger upload suppressed (<120s)")
             return
         query_timer_state["last_transition_request"] = now
+        _LOGGER.info("Fresh driving evidence — requesting one full state")
         try:
             sent = await hass.async_add_executor_job(
                 mqtt_client.send_command, vin, 19, {"cmd_type": 2}, 2
@@ -950,12 +955,30 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             data.get("has_fresh_shift_data") or data.get("has_fresh_speed_data")
         )
         coordinator.set_vehicle_data(data)
+        new_parked = coordinator.vehicle_parked
+        if was_parked != new_parked:
+            # State-only diagnostic: no GPS, VIN, identity, or MQTT body.
+            # Print both *cached values* and freshness provenance to distinguish
+            # actual P/D/R changes from cloud snapshots with stale shift values.
+            content = (getattr(coordinator, "last_full_data", None) or {}).get("msg_content", {})
+            instant = content.get("instant", {}) if isinstance(content, dict) else {}
+            interval = content.get("interval", {}) if isinstance(content, dict) else {}
+            idrive = instant.get("drive", {}) if isinstance(instant, dict) else {}
+            vdrive = interval.get("drive", {}) if isinstance(interval, dict) else {}
+            idrive = idrive if isinstance(idrive, dict) else {}
+            vdrive = vdrive if isinstance(vdrive, dict) else {}
+            _LOGGER.debug(
+                "Motion classifier: %s -> %s shift=%r speed=%r fresh_shift=%s fresh_speed=%s",
+                was_parked, new_parked,
+                idrive.get("shift_state"), vdrive.get("speed", idrive.get("speed")),
+                bool(data.get("has_fresh_shift_data")),
+                bool(data.get("has_fresh_speed_data")),
+            )
         # Previous state can be Unknown after hours of sleep. A fresh D/R
         # frame or signed moving speed is valid evidence in either case.
         if (was_parked is not False and coordinator.vehicle_parked is False
                 and actual_motion_frame):
             if coordinator.command_policy.can_wake():
-                _LOGGER.info("New driving signal after parked/unknown — requesting full state")
                 hass.async_create_task(_request_transition_full_state())
             else:
                 _LOGGER.debug("Driving transition seen; automatic wake prohibited by policy")
