@@ -9,6 +9,7 @@ _async_update_data or manage the MQTT connection. Instead:
 from __future__ import annotations
 
 import logging
+import math
 import time
 from collections import deque
 from datetime import date, datetime, timedelta, timezone
@@ -1184,8 +1185,8 @@ class XPengDataCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     pass
 
         # Prefer a newer shift change (particularly P after braking) over
-        # an earlier speed reading. A newer positive speed, however, can
-        # correctly reveal a drive even when the last shift frame said P.
+        # an earlier speed reading. A newer non-zero signed speed can reveal
+        # motion in either direction even when the cached shift still says P.
         if shift_recent and (
             not speed_recent or shift_ts >= speed_ts
         ) and parked_shift is not None:
@@ -1194,8 +1195,12 @@ class XPengDataCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if speed_recent:
             speed_raw = interval_drive.get("speed", instant_drive.get("speed"))
             try:
-                if speed_raw is not None and float(speed_raw) > 0:
-                    return False
+                if speed_raw is not None:
+                    speed = float(speed_raw)
+                    # The cloud may encode reversing as negative speed.
+                    # Ignore NaN/Infinity rather than treating them as motion.
+                    if math.isfinite(speed) and speed != 0.0:
+                        return False
             except (TypeError, ValueError):
                 pass
 
