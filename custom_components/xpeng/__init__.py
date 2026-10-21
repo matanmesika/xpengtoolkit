@@ -951,9 +951,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         """Compare consecutive observations ON the Home Assistant event loop."""
         was_parked = coordinator.vehicle_parked
         # Inspect the original packet BEFORE the coordinator consumes flags.
-        actual_motion_frame = bool(
-            data.get("has_fresh_shift_data") or data.get("has_fresh_speed_data")
-        )
+        fresh_shift = bool(data.get("has_fresh_shift_data"))
+        fresh_speed = bool(data.get("has_fresh_speed_data"))
+        actual_motion_frame = fresh_shift or fresh_speed
         coordinator.set_vehicle_data(data)
         new_parked = coordinator.vehicle_parked
         if was_parked != new_parked:
@@ -971,8 +971,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 "Motion classifier: %s -> %s shift=%r speed=%r fresh_shift=%s fresh_speed=%s",
                 was_parked, new_parked,
                 idrive.get("shift_state"), vdrive.get("speed", idrive.get("speed")),
-                bool(data.get("has_fresh_shift_data")),
-                bool(data.get("has_fresh_speed_data")),
+                fresh_shift, fresh_speed,
             )
         # Previous state can be Unknown after hours of sleep. A fresh D/R
         # frame or signed moving speed is valid evidence in either case.
