@@ -28,7 +28,7 @@ class FakeStore:
         self.events.append(("save", payload["last_escalation"]))
 
 
-def exercise_startup(*, old_wake, now=200_000, running=False, allow_wake=True):
+def exercise_startup(*, old_wake, now=200_000, running=False, allow_wake=True, connected=True):
     tree = ast.parse(ROOT.read_text(encoding="utf8"))
     setup = next(n for n in tree.body if isinstance(n, ast.AsyncFunctionDef)
                  and n.name == "async_setup_entry")
@@ -59,7 +59,7 @@ def exercise_startup(*, old_wake, now=200_000, running=False, allow_wake=True):
         "_LOGGER": logging.getLogger(__name__),
         "ESCALATE_BACKOFF_SECONDS": 43_200,
         "mqtt_client": SimpleNamespace(
-            send_command=send_command, send_query=send_query),
+            connected=connected, send_command=send_command, send_query=send_query),
         "vin": "TESTVIN",
     }
     exec(compile(ast.fix_missing_locations(module), str(ROOT), "exec"), env)
@@ -104,3 +104,12 @@ def test_watchdog_uses_same_persisted_store_and_budget():
     assert source.index("watchdog_store: Store = Store(") < source.index("# 5. Initial query.")
     assert 'await watchdog_store.async_save({"last_escalation": now_ts})' in source
     assert source.count('await watchdog_store.async_save({"last_escalation": now_ts})') == 2
+
+
+def test_offline_on_first_boot_does_not_spend_wake_quota():
+    events, state, timer = exercise_startup(
+        old_wake=0, connected=False
+    )
+    assert events == []
+    assert state["last_escalation"] == 0
+    assert timer["last_transition_request"] == 0
