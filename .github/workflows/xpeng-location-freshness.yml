@@ -52,12 +52,12 @@ jobs:
           mkdir -p beta-build/custom_components
           cp -a custom_components/xpeng beta-build/custom_components/
           find beta-build -type d -name __pycache__ -prune -exec rm -rf {} +
-          (cd beta-build && zip -qr ../XPENG-Toolkit-0.6.18b2.zip custom_components)
-          unzip -l XPENG-Toolkit-0.6.18b2.zip | head -25
+          (cd beta-build && zip -qr ../XPENG-Toolkit-0.6.18b3.zip custom_components)
+          unzip -l XPENG-Toolkit-0.6.18b3.zip | head -25
       - name: Upload side-test package
         if: (github.head_ref == 'beta/telemetry-state-audit-20261020' || github.ref_name == 'beta/telemetry-state-audit-20261020') && matrix.python-version == '3.13'
         uses: actions/upload-artifact@v4
         with:
-          name: XPENG-Toolkit-0.6.18b2
-          path: XPENG-Toolkit-0.6.18b2.zip
+          name: XPENG-Toolkit-0.6.18b3
+          path: XPENG-Toolkit-0.6.18b3.zip
           retention-days: 30
