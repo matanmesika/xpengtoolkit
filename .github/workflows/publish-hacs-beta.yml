@@ -1,0 +1,37 @@
+name: Publish HACS test beta v0.6.18b4
+on:
+  push:
+    branches:
+      - beta/telemetry-state-audit-20261020
+    paths:
+      - .github/workflows/publish-hacs-beta.yml
+
+permissions:
+  contents: write
+
+jobs:
+  prerelease:
+    name: Publish versioned beta for HACS
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check approved beta source commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh api "repos/${GITHUB_REPOSITORY}/commits/4da63b3c64b7a976273f666c3302ec8cf5378918" --jq '.sha'
+      - name: Create a versioned prerelease at the previously tested commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if gh release view v0.6.18b4 --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            echo "v0.6.18b4 already exists — not overwriting it"
+            exit 0
+          fi
+          gh release create v0.6.18b4 \
+            --repo "${GITHUB_REPOSITORY}" \
+            --target 4da63b3c64b7a976273f666c3302ec8cf5378918 \
+            --title "XPENG Toolkit 0.6.18b4 — HACS test beta" \
+            --prerelease \
+            --notes "Pre-release for HACS installation of XPENG Toolkit state-transition fixes. Source is the exact tested beta commit 4da63b3. Tested on Python 3.13/3.14 (104 focused and 831 full pytest passes). This is a test build: back up Home Assistant first, keep credentials and the car-wake safety policy unchanged, and do not merge to stable without road testing. See the beta testing instructions in the repository."
