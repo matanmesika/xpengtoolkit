@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import ast
 import logging
+import math
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -27,7 +28,7 @@ def method(name, *, filename="coordinator.py", class_name="XPengDataCoordinator"
         ast.ImportFrom(module="__future__", names=[ast.alias(name="annotations")], level=0),
         node,
     ], type_ignores=[])
-    env = {"datetime": datetime, "timezone": timezone,
+    env = {"datetime": datetime, "timezone": timezone, "math": math,
            "_LOGGER": logging.getLogger(__name__)}
     if filename == "sensor.py":
         def age(ts, now):
@@ -61,6 +62,13 @@ def coordinator(shift=None, speed=None, *, shift_age=None, speed_age=None):
     (1, 55, 601, 601, None), # past a ten-minute silent interval, state unknown
     (3, 55, 601, 601, None),
     (None, 60, None, 5, False),  # speed-only frame, no shift yet
+    (None, -5, None, 5, False),  # signed reverse speed alone proves movement
+    (3, -5, 20, 2, False),    # fresh reverse movement defeats stale P gear
+    (3, -5, 2, 20, True),    # newer P wins over stale negative reverse speed
+    (2, -5, 2, 20, False),    # current R also proves not parked
+    (2, 0, 2, 20, False),     # R at zero speed is still an active drive gear
+    (None, float("nan"), None, 2, None),  # bad input is not movement
+    (None, float("-inf"), None, 2, None),  # bad input is not movement
     (None, 0, None, 5, None),
 ])
 def test_motion_state_uses_newest_fresh_signal(
