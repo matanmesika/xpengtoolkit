@@ -130,8 +130,40 @@ def test_charging_cadence_expires_stale_charge_samples(
             now - timedelta(seconds=seconds_ago)
             if seconds_ago is not None else None
         ),
+        last_charge_state_timestamp=(
+            now - timedelta(seconds=seconds_ago)
+            if seconds_ago is not None else None
+        ),
+        last_charge_power_timestamp=(
+            now - timedelta(seconds=seconds_ago)
+            if seconds_ago is not None else None
+        ),
     )
     assert method("is_charging")(state) is expected
+
+
+@pytest.mark.parametrize("state,watts,state_age,power_age,expected", [
+    (2, 0, 5, 2, False),    # latest 0W overrides prior charging state
+    (1, 2100, 2, 5, True), # latest power confirms charging
+    (2, 0, 2, 5, True),    # latest state confirms charging despite old zero power
+    (1, 2100, 5, 2, False),# newer not-charging status overrides old charge
+    (2, 0, 2, None, True), # only status received
+    (1, 2100, None, 2, True), # only power received
+    (2, 2100, 601, 601, False), # both stale
+])
+def test_charge_signal_ordering(state, watts, state_age, power_age, expected):
+    now = datetime.now(timezone.utc)
+    c = SimpleNamespace(
+        _last_full_data={"msg_content": {
+            "instant": {"charge": {"charging_state": state}},
+            "interval": {"charge": {"power": watts}},
+        }},
+        last_charge_state_timestamp=(
+            now - timedelta(seconds=state_age) if state_age is not None else None),
+        last_charge_power_timestamp=(
+            now - timedelta(seconds=power_age) if power_age is not None else None),
+    )
+    assert method("is_charging")(c) is expected
 
 
 def test_charge_timestamp_is_only_refreshed_by_charge_telemetry():
