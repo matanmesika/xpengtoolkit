@@ -178,6 +178,7 @@ def test_raw_mode_remains_raw_while_speed_and_gps_expire():
     assert reading("vehicle_mode", False, 1, converter=lambda _: "Standby") == "Standby"
     assert reading("speed", True, 117, converter=float) == 0.0
     assert reading("speed", False, 42, converter=float) == 42.0
+    assert reading("speed", False, -5, converter=float) == -5.0
     assert reading("speed", False, 42, age=601, converter=float) is None
     assert reading("shift_state", False, 1, age=601) is None
     assert reading("vehicle_mode", False, 1, age=901) is None
