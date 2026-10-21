@@ -42,22 +42,26 @@ jobs:
           python -m py_compile tests/test_operational_state.py
           python -m py_compile tests/test_automatic_query.py
           python -m py_compile custom_components/xpeng/operational_state.py
+          python -m py_compile tests/test_startup_wake.py
+          python -m compileall -q custom_components/xpeng
       - name: Run GPS / MQTT regression tests
-        run: python -m pytest -q tests/test_location_freshness.py tests/test_mqtt_state_delivery.py tests/test_motion_cadence.py tests/test_operational_state.py tests/test_automatic_query.py
+        run: python -m pytest -q tests/test_location_freshness.py tests/test_mqtt_state_delivery.py tests/test_motion_cadence.py tests/test_operational_state.py tests/test_automatic_query.py tests/test_startup_wake.py
       - name: Run whole integration regression suite
         run: python -m unittest discover -s tests -v
+      - name: Run full pytest regression suite
+        run: python -m pytest -q tests
       - name: Package side-test beta (only after tests pass)
         if: (github.head_ref == 'beta/telemetry-state-audit-20261020' || github.ref_name == 'beta/telemetry-state-audit-20261020') && matrix.python-version == '3.13'
         run: |
           mkdir -p beta-build/custom_components
           cp -a custom_components/xpeng beta-build/custom_components/
           find beta-build -type d -name __pycache__ -prune -exec rm -rf {} +
-          (cd beta-build && zip -qr ../XPENG-Toolkit-0.6.18b3.zip custom_components)
-          unzip -l XPENG-Toolkit-0.6.18b3.zip | head -25
+          (cd beta-build && zip -qr ../XPENG-Toolkit-0.6.18b4.zip custom_components)
+          unzip -l XPENG-Toolkit-0.6.18b4.zip | head -25
       - name: Upload side-test package
         if: (github.head_ref == 'beta/telemetry-state-audit-20261020' || github.ref_name == 'beta/telemetry-state-audit-20261020') && matrix.python-version == '3.13'
         uses: actions/upload-artifact@v4
         with:
-          name: XPENG-Toolkit-0.6.18b3
-          path: XPENG-Toolkit-0.6.18b3.zip
+          name: XPENG-Toolkit-0.6.18b4
+          path: XPENG-Toolkit-0.6.18b4.zip
           retention-days: 30
