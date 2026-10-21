@@ -135,6 +135,8 @@ class XPengDataCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self.last_shift_timestamp: datetime | None = None
         self.last_speed_timestamp: datetime | None = None
         self.last_charge_timestamp: datetime | None = None
+        self.last_charge_state_timestamp: datetime | None = None
+        self.last_charge_power_timestamp: datetime | None = None
         self.last_mode_timestamp: datetime | None = None
         self.last_motion_transition_timestamp: datetime | None = None
         self.last_motion_transition: str | None = None
@@ -327,6 +329,8 @@ class XPengDataCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         has_fresh_shift_data = data.pop("has_fresh_shift_data", False)
         has_fresh_speed_data = data.pop("has_fresh_speed_data", False)
         has_fresh_charge_data = data.pop("has_fresh_charge_data", False)
+        has_fresh_charge_state_data = data.pop("has_fresh_charge_state_data", False)
+        has_fresh_charge_power_data = data.pop("has_fresh_charge_power_data", False)
         has_fresh_mode_data = data.pop("has_fresh_mode_data", False)
         prior_motion = getattr(self, "vehicle_parked", None)
         self._last_full_data = data
@@ -341,6 +345,10 @@ class XPengDataCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             self.last_speed_timestamp = self.last_data_timestamp
         if has_fresh_charge_data:
             self.last_charge_timestamp = self.last_data_timestamp
+        if has_fresh_charge_state_data:
+            self.last_charge_state_timestamp = self.last_data_timestamp
+        if has_fresh_charge_power_data:
+            self.last_charge_power_timestamp = self.last_data_timestamp
         if has_fresh_mode_data:
             self.last_mode_timestamp = self.last_data_timestamp
         self.state_is_restored = False
@@ -1229,47 +1237,66 @@ class XPengDataCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
     @property
     def is_charging(self) -> bool:
-        """Return whether the vehicle is currently charging.
+        """True only from recent charge status or power evidence.
 
-        Same logic as the ``charging`` binary sensor: charging_state 2 is
-        car-initiated charging; interval charge power > 0 catches external
-        charging (e.g. EVCC) where charging_state isn't set. Used by the
-        periodic-query and watchdog timers to decide their cadence — we poll
-        frequently while charging and go quiet otherwise so we don't keep a
-        parked car awake.
+        XPENG may send a charge-power update without charging_state and
+        vice versa. They are independently timestamped from the ORIGINAL
+        MQTT payload; newer zero power must not revive cached state=2.
+        A true simultaneous snapshot keeps the permissive either/or rule.
         """
         if not self._last_full_data:
             return False
-        # A cached charging_state=2 can outlive the actual charging session.
-        # Stop force-uploading once the last real charge frame is ten minutes
-        # old; a restored snapshot or REST widget merge is not fresh MQTT.
-        last_charge = getattr(self, "last_charge_timestamp", None)
-        if last_charge is None:
+        now = datetime.now(timezone.utc)
+        state_ts = getattr(self, "last_charge_state_timestamp", None)
+        power_ts = getattr(self, "last_charge_power_timestamp", None)
+
+        def recent(ts: datetime | None) -> bool:
+            if ts is None:
+                return False
+            try:
+                age = (now - ts).total_seconds()
+            except (TypeError, ValueError):
+                return False
+            return 0 <= age < 600
+
+        state_recent = recent(state_ts)
+        power_recent = recent(power_ts)
+        if not state_recent and not power_recent:
             return False
-        try:
-            age = (datetime.now(timezone.utc) - last_charge).total_seconds()
-        except (TypeError, ValueError):
-            return False
-        if age < 0 or age >= 600:
-            return False
+
         content = self._last_full_data.get("msg_content", {})
         if not isinstance(content, dict):
             return False
         instant = content.get("instant", {})
-        if isinstance(instant, dict):
-            charge = instant.get("charge")
-            if isinstance(charge, dict) and charge.get("charging_state") == 2:
-                return True
         interval = content.get("interval", {})
-        if isinstance(interval, dict):
-            charge = interval.get("charge")
-            if isinstance(charge, dict):
-                try:
-                    if float(charge.get("power", 0) or 0) > 0:
-                        return True
-                except (TypeError, ValueError):
-                    pass
-        return False
+        charge_state: Any = None
+        charge_power: Any = None
+        if isinstance(instant, dict) and isinstance(instant.get("charge"), dict):
+            charge_state = instant["charge"].get("charging_state")
+        if isinstance(interval, dict) and isinstance(interval.get("charge"), dict):
+            charge_power = interval["charge"].get("power")
+
+        def state_is_charging() -> bool:
+            try:
+                return int(charge_state) == 2
+            except (TypeError, ValueError, OverflowError):
+                return False
+
+        def power_is_charging() -> bool:
+            try:
+                power = float(charge_power)
+                return math.isfinite(power) and power > 0
+            except (TypeError, ValueError, OverflowError):
+                return False
+
+        if state_recent and power_recent:
+            if state_ts == power_ts:
+                return state_is_charging() or power_is_charging()
+            return (state_is_charging() if state_ts > power_ts
+                    else power_is_charging())
+        if state_recent:
+            return state_is_charging()
+        return power_is_charging()
 
     @property
     def last_full_data(self) -> dict[str, Any] | None:
