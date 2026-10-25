@@ -192,6 +192,10 @@ class ScheduleTests(unittest.IsolatedAsyncioTestCase):
         hass, a, b = self.make(two=True)
         a["command_policy"] = policy.CommandPolicy.from_preset("full")
         b["command_policy"] = policy.CommandPolicy.from_preset("read_only")
+        # Production config entries expose entry_id; model it in this
+        # isolated test too, because service authorization now binds to it.
+        a["entry"] = SimpleNamespace(entry_id="a")
+        b["entry"] = SimpleNamespace(entry_id="b")
         tree = ast.parse(
             (
                 Path(__file__).resolve().parent.parent
@@ -205,8 +209,8 @@ class ScheduleTests(unittest.IsolatedAsyncioTestCase):
         )
         seen = []
 
-        async def guard(hass, call, service, group, p):
-            seen.append(p)
+        async def guard(hass, call, service, group, p, *, entry_id):
+            seen.append((p, entry_id))
             if not p.allows(group):
                 raise Error("Denied selected policy")
 
@@ -220,6 +224,7 @@ class ScheduleTests(unittest.IsolatedAsyncioTestCase):
             "_get_entry_data": lambda hass: a,
             "default_policy": policy.default_policy,
             "async_guard_service": guard,
+            "HomeAssistantError": Error,
             "handler": handler,
         }
         for key, value in (
@@ -241,7 +246,7 @@ class ScheduleTests(unittest.IsolatedAsyncioTestCase):
             await env["_gated"](
                 SimpleNamespace(data={"vehicle_entity_id": "climate.car_b"})
             )
-        self.assertIs(seen[0], b["command_policy"])
+        self.assertEqual(seen[0], (b["command_policy"], "b"))
         handler.assert_not_called()
 
     def test_multiple_cars_require_explicit_target_and_foreign_entities_are_rejected(
