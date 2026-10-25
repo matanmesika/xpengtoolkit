@@ -12,8 +12,11 @@ with fake HVAC, charge, TPMS, gear and GPS sensor messages. No real VIN/GPS.
 from __future__ import annotations
 
 import ast
+import asyncio
 import importlib.util
+import json
 import sys
+import threading
 import types
 from typing import Any
 import time
@@ -113,6 +116,14 @@ class ProductionHACallbackSimulation(unittest.TestCase):
             def async_add_executor_job(self, fn, *args):
                 self.sent.append((fn, args))
 
+                class DeferredJob:
+                    def __await__(self):
+                        async def run():
+                            return fn(*args)
+                        return run().__await__()
+
+                return DeferredJob()
+
         self.hass = FakeHass(self.sent)
         self.env = {
             "coordinator": self.sim.coord,
@@ -129,6 +140,66 @@ class ProductionHACallbackSimulation(unittest.TestCase):
             ast.Module(body=[fn], type_ignores=[])), "__init__.py", "exec"
         ), self.env)
         self.handler = self.env["_handle_vehicle_state"]
+
+    def run_production_watchdog_tick(self, *, last_escalation):
+        """Execute the real nested watchdog tick with fake time and transport."""
+        source = _component.component_dir() / "__init__.py"
+        tree = ast.parse(source.read_text(encoding="utf-8"))
+        watchdog = next(
+            node for node in ast.walk(tree)
+            if isinstance(node, ast.AsyncFunctionDef)
+            and node.name == "_silence_watchdog"
+        )
+
+        class Store:
+            def __init__(self):
+                self.saved = []
+
+            async def async_save(self, value):
+                self.saved.append(value)
+
+        class QuietLogger:
+            def __getattr__(self, _name):
+                return lambda *args, **kwargs: None
+
+        now = time.time()
+        if not hasattr(self.sim.coord, "poll_status"):
+            self.sim.coord.poll_status = {}
+        self.sim.coord.command_policy = types.SimpleNamespace(can_wake=lambda: True)
+        watchdog_state = {
+            "last_reconnect": now,
+            "tick_count": 0,
+            "last_escalation": last_escalation,
+            "escalations": 0,
+        }
+        self.store = Store()
+        self.watchdog_state = watchdog_state
+        self.env.update({
+            "watchdog_state": watchdog_state,
+            "watchdog_store": self.store,
+            "refresh_state": {"refreshing": False},
+            "entry": object(),
+            "time": time,
+            "poll_status": types.SimpleNamespace(
+                is_escalated=lambda *args, **kwargs: False
+            ),
+            "should_escalate": policy.should_escalate,
+            "should_escalate_moving": policy.should_escalate_moving,
+            "should_escalate_stale_gps": policy.should_escalate_stale_gps,
+            "ESCALATE_AFTER_SECONDS": policy.ESCALATE_AFTER_SECONDS,
+            "ESCALATE_BACKOFF_SECONDS": policy.ESCALATE_BACKOFF_SECONDS,
+            "SILENCE_THRESHOLD": 300,
+            "RECONNECT_BACKOFF": 600,
+            "PARKED_RECONNECT_BACKOFF": 1800,
+            "_record_credential_failure": lambda *args, **kwargs: None,
+            "_refresh_creds_sync": lambda *args, **kwargs: None,
+            "expires_at_from_account": lambda *_args, **_kwargs: 0,
+            "_LOGGER": QuietLogger(),
+        })
+        exec(compile(ast.fix_missing_locations(
+            ast.Module(body=[watchdog], type_ignores=[])), "__init__.py", "exec"
+        ), self.env)
+        asyncio.run(self.env["_silence_watchdog"](None))
 
     def frame(self, shift=None, speed=None, *, interval_speed=None):
         import copy
@@ -288,6 +359,53 @@ class ProductionHACallbackSimulation(unittest.TestCase):
             sim.coord._last_full_data, now=now - parked_for
         )
 
+        # Turn HVAC on through the real MQTT wait-for-ack path. The vehicle is
+        # parked/asleep; a service_type=3 acknowledgment must confirm the
+        # command without being misread as a vehicle-state/motion update.
+        published = threading.Event()
+        packets = []
+
+        class FakeBroker:
+            def publish(_self, topic, payload, qos):
+                packets.append(json.loads(payload))
+                published.set()
+                return types.SimpleNamespace(rc=0)
+
+        feedback = []
+        sim.client._client = FakeBroker()
+        sim.client._connected = True
+        sim.client.set_command_feedback_callback(feedback.append)
+        meaningful_before_hvac = sim.client.last_meaningful_state_ts
+        command_results = []
+        command_thread = threading.Thread(
+            target=lambda: command_results.append(sim.client.send_command_wait(
+                VIN, 3, {"cmd_type": 1, "cmd_value": 1}, 2, timeout=2,
+            )),
+            daemon=True,
+        )
+        command_thread.start()
+        self.assertTrue(published.wait(1), "HVAC command was not published")
+        request = packets[0]
+        self.assertEqual(request["service_type"], 3)
+        self.assertEqual(request["msg_content"], {"cmd_type": 1, "cmd_value": 1})
+        sim.client._on_message(None, None, _Msg({
+            "service_type": 3,
+            "msg_type": 1,
+            "msg_id": request["msg_id"],
+            "msg_content": {
+                "code": 200, "msg": "Succeeded", "cmd_type": 1,
+                "cmd_value": 1, "hvac_on": 1,
+            },
+        }))
+        command_thread.join(timeout=1)
+        self.assertFalse(command_thread.is_alive())
+        self.assertEqual(command_results[0]["msg_content"]["code"], 200)
+        self.assertEqual(len(feedback), 1)
+        self.assertEqual(feedback[0]["service_type"], 3)
+        self.assertTrue(sim.coord.vehicle_parked)
+        self.assertEqual(sim.coord.last_motion_at, 0)
+        self.assertEqual(sim.client.last_meaningful_state_ts, meaningful_before_hvac)
+
         # Even though the ordinary 12 h budget was recently spent, no fresh
         # motion evidence means neither stale GPS nor parked stubs may wake it.
         self.assertFalse(policy.should_escalate(
@@ -296,8 +414,18 @@ class ProductionHACallbackSimulation(unittest.TestCase):
         self.assertFalse(policy.should_escalate_stale_gps(
             parked_for, last_wake, now, sim.coord.last_motion_at
         ))
+        duplicate_interval = {
+            "latitude": 32.123,
+            "longitude": 34.456,
+            "coordValid": 1,
+            "speed": 0,
+        }
+        meaningful_before_stubs = sim.client.last_meaningful_state_ts
         for _ in range(4):
-            sim.push()  # exact duplicate stub: must not refresh meaningful age
+            # Stub-shaped response: the car repeats its held GPS/speed values.
+            # Equality against the merged baseline must classify it as a stub.
+            sim.push(interval={"drive": dict(duplicate_interval)})
+        self.assertEqual(sim.client.last_meaningful_state_ts, meaningful_before_stubs)
         sim.push(instant={"hvac": {"hvac_inner_temp_float": 24}})
         sim.push(instant={"charge": {"battery_soc": 29}})
         self.assertTrue(sim.coord.vehicle_parked)
@@ -305,12 +433,41 @@ class ProductionHACallbackSimulation(unittest.TestCase):
         self.assertGreater(sim.coord.gps_fix.age_seconds(time.time()), 12 * 60 * 60)
         self.assertEqual(len(self.sent), 0)
 
+        # Run the production watchdog tick itself: stale GPS during a sleeping
+        # parked episode must not trigger a wake, even after many stub/partial
+        # messages and an HVAC command acknowledgment.
+        self.run_production_watchdog_tick(last_escalation=last_wake)
+        self.assertEqual(self.watchdog_state["escalations"], 0)
+        self.assertEqual(self.store.saved, [])
+        self.assertEqual(len(self.sent), 0)
+
         # Fresh D is a new drive episode, not inherited cached state. It
         # bypasses the spent parked budget and requests a full-state snapshot.
+        transmissions = []
+        sim.client.send_command = lambda *args: transmissions.append(args) or True
         sim.push(instant={"drive": {"shift_state": "D", "speed": 17}})
         self.assertFalse(sim.coord.vehicle_parked)
         self.assertGreater(sim.coord.last_motion_at, last_wake)
         self.assert_full_state_publish()
+
+        # With the position still >12h old, run the real watchdog tick after
+        # motion evidence. It must persist and send one GPS recovery upload even
+        # though the generic MQTT data clock was just refreshed by the D frame.
+        self.assertTrue(policy.should_escalate_stale_gps(
+            sim.coord.gps_fix.age_seconds(time.time()),
+            last_wake, time.time(), sim.coord.last_motion_at,
+        ))
+        self.assertTrue(sim.client.connected)
+        self.run_production_watchdog_tick(last_escalation=last_wake)
+        self.assertEqual(self.watchdog_state["escalations"], 1)
+        self.assertEqual(len(self.store.saved), 1)
+        self.assertEqual(len(transmissions), 1)
+        self.assertEqual(transmissions[0], (VIN, 19, {"cmd_type": 2}, 2))
+        self.run_production_watchdog_tick(
+            last_escalation=self.watchdog_state["last_escalation"]
+        )
+        self.assertEqual(self.watchdog_state["escalations"], 0)
+        self.assertEqual(len(transmissions), 1, "watchdog must not repeat the recovery upload")
 
         # The tracker only becomes fresh when a new, valid GPS-bearing frame
         # arrives; a drive indication alone cannot make cached coordinates new.
@@ -319,6 +476,34 @@ class ProductionHACallbackSimulation(unittest.TestCase):
             "latitude": 32.20, "longitude": 34.50, "coordValid": 1,
         }})
         self.assertEqual(sim.coord.gps_fix.position, (32.20, 34.50))
+        self.assertLess(sim.coord.gps_fix.age_seconds(time.time()), 2)
+
+    def test_reverse_with_negative_speed_starts_motion_recovery(self):
+        """R plus negative speed is a real drive transition, not a stub."""
+        sim = self.sim
+        sim.client.set_state_callback(self.dispatch_parsed_state)
+        now = time.time()
+        sim.coord.last_motion_at = 0
+        sim.coord.last_data_timestamp = datetime.fromtimestamp(
+            now - 13 * 60 * 60, tz=timezone.utc
+        )
+        sim.client._last_meaningful_state_ts = now - 13 * 60 * 60
+
+        # A parked baseline may be held in the merged state. Reverse gear and
+        # a negative speed reading must independently establish current motion.
+        sim.push(instant={"drive": {"shift_state": "R", "speed": -6}})
+
+        self.assertFalse(sim.coord.vehicle_parked)
+        self.assertGreater(sim.coord.last_motion_at, now - 2)
+        self.assertTrue(sim.coord.mqtt_motion_is_recent)
+        self.assert_full_state_publish()
+
+        # Reverse movement does not refresh the GPS position by itself.
+        self.assertGreater(sim.coord.gps_fix.age_seconds(time.time()), 12 * 60 * 60)
+        sim.push(interval={"drive": {
+            "latitude": 32.21, "longitude": 34.51, "coordValid": 1,
+        }})
+        self.assertEqual(sim.coord.gps_fix.position, (32.21, 34.51))
         self.assertLess(sim.coord.gps_fix.age_seconds(time.time()), 2)
 
     def test_parked_12h_recovery_flow_is_stable_across_100_variants(self):
@@ -352,8 +537,14 @@ class ProductionHACallbackSimulation(unittest.TestCase):
 
                 # Vary duplicate-stub count and the ordering of unrelated
                 # partial sections while preserving the same no-motion fact.
-                for _ in range((iteration % 5) + 1):
-                    sim.push()
+                for stub_index in range((iteration % 5) + 1):
+                    if stub_index % 2:
+                        sim.push(interval={"drive": {
+                            "latitude": 32.123, "longitude": 34.456,
+                            "coordValid": 1, "speed": 0,
+                        }})
+                    else:
+                        sim.push()
                 partials = [
                     {"instant": {"hvac": {"hvac_inner_temp_float": 20 + iteration % 8}}},
                     {"instant": {"charge": {"battery_soc": 29}}},
