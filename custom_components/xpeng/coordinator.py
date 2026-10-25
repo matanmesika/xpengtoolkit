@@ -158,6 +158,11 @@ class XPengDataCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         #: force-upload cannot turn into a wake - see
         #: watchdog_policy.should_escalate_moving and drive_evidence.py.
         self.last_motion_at: float = 0.0
+        # Fresh MQTT drive evidence only. Unlike the REST odometer hint, this
+        # can justify an immediate active query while the car is already awake.
+        # Expire it after 120s so a missing final P cannot make a sleeping car
+        # receive force-uploads forever.
+        self.mqtt_motion_until: float = 0.0
         #: The last position that was actually a GPS fix, and how old it is.
         #: ``interval.drive.coordValid`` says whether a frame's coordinates are a
         #: current fix or the car's last known position; see drive_evidence.py.
@@ -1328,9 +1333,17 @@ class XPengDataCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             }
         view = drive_view(observed)
         if view["moving"]:
-            self.last_motion_at = time.time()
+            now = time.time()
+            self.last_motion_at = now
+            self.mqtt_motion_until = now + 120
         elif view["parked"]:
             self.last_motion_at = 0.0
+            self.mqtt_motion_until = 0.0
+
+    @property
+    def mqtt_motion_is_recent(self) -> bool:
+        """Recent *incoming MQTT* D/speed, not REST or inherited cached fields."""
+        return time.time() < getattr(self, "mqtt_motion_until", 0.0)
 
     @property
     def external_charging_hint(self) -> bool:
