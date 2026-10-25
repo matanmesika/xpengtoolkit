@@ -321,6 +321,80 @@ class ProductionHACallbackSimulation(unittest.TestCase):
         self.assertEqual(sim.coord.gps_fix.position, (32.20, 34.50))
         self.assertLess(sim.coord.gps_fix.age_seconds(time.time()), 2)
 
+    def test_parked_12h_recovery_flow_is_stable_across_100_variants(self):
+        """Stress the reported sequence to catch order-dependent regressions."""
+        for iteration in range(100):
+            with self.subTest(iteration=iteration):
+                sim = FakeG6()
+                self.sim = sim
+                self.sent.clear()
+                self.env["coordinator"] = sim.coord
+                self.env["mqtt_client"] = sim.client
+                sim.client.set_state_callback(self.dispatch_parsed_state)
+
+                now = time.time()
+                parked_for = (12 * 60 * 60) + iteration * 37
+                last_wake = now - (30 * 60) - (iteration % 10) * 45 * 60
+                sim.client._last_meaningful_state_ts = now - parked_for
+                sim.coord.last_data_timestamp = datetime.fromtimestamp(
+                    now - parked_for, tz=timezone.utc
+                )
+                sim.coord.gps_fix.observe(
+                    sim.coord._last_full_data, now=now - parked_for
+                )
+
+                self.assertFalse(policy.should_escalate(
+                    parked_for, last_wake, now
+                ))
+                self.assertFalse(policy.should_escalate_stale_gps(
+                    parked_for, last_wake, now, sim.coord.last_motion_at
+                ))
+
+                # Vary duplicate-stub count and the ordering of unrelated
+                # partial sections while preserving the same no-motion fact.
+                for _ in range((iteration % 5) + 1):
+                    sim.push()
+                partials = [
+                    {"instant": {"hvac": {"hvac_inner_temp_float": 20 + iteration % 8}}},
+                    {"instant": {"charge": {"battery_soc": 29}}},
+                    {"instant": {"tpms": {"fl": 270 + iteration % 10}}},
+                ]
+                rotate = iteration % len(partials)
+                for partial in partials[rotate:] + partials[:rotate]:
+                    self.sim.push(**partial)
+                self.assertTrue(sim.coord.vehicle_parked)
+                self.assertEqual(sim.coord.last_motion_at, 0)
+                self.assertGreater(sim.coord.gps_fix.age_seconds(time.time()), 12 * 60 * 60)
+                self.assertEqual(len(self.sent), 0)
+
+                # Alternate between shift evidence and interval-speed-only
+                # evidence, which must override cached P as a new report.
+                if iteration % 2:
+                    sim.push(interval={"drive": {"speed": 11 + iteration % 20}})
+                else:
+                    sim.push(instant={"drive": {
+                        "shift_state": "D", "speed": 11 + iteration % 20,
+                    }})
+                self.assertFalse(sim.coord.vehicle_parked)
+                self.assertEqual(len(self.sent), 1)
+                self.assert_full_state_publish()
+
+                # Repeated driving evidence must not enqueue duplicate
+                # transition uploads; GPS still requires a coordinate frame.
+                sim.push(instant={"drive": {"shift_state": "D", "speed": 15}})
+                self.assertEqual(len(self.sent), 1)
+                lat = 32.2 + iteration / 100000
+                lon = 34.5 + iteration / 100000
+                sim.push(interval={"drive": {
+                    "latitude": lat, "longitude": lon, "coordValid": 1,
+                }})
+                self.assertEqual(sim.coord.gps_fix.position, (lat, lon))
+                self.assertLess(sim.coord.gps_fix.age_seconds(time.time()), 2)
+
+                sim.push(instant={"drive": {"shift_state": "P", "speed": 0}})
+                self.assertTrue(sim.coord.vehicle_parked)
+                self.assertEqual(sim.coord.last_motion_at, 0)
+
 
 class MotionEvidenceAndGpsAge(unittest.TestCase):
     def setUp(self):
