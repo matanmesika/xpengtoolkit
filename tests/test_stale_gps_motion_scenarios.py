@@ -266,6 +266,61 @@ class ProductionHACallbackSimulation(unittest.TestCase):
         self.assertTrue(sim.coord.vehicle_parked)
         self.assertEqual(sim.coord.last_motion_at, 0)
 
+    def test_parked_over_12h_stubs_partials_then_drive_and_gps(self):
+        """Reproduce today's reported sequence as one continuous flow.
+
+        The car has been parked past the sleeping-car wake budget, its last
+        allowed wake was recent, and it answers with repeated stubs plus useful
+        but non-drive partials. A new D/speed frame must still switch to active
+        and request full state; the following coordinate-bearing frame must
+        refresh the tracker.
+        """
+        sim = self.sim
+        sim.client.set_state_callback(self.dispatch_parsed_state)
+        now = time.time()
+        parked_for = 13 * 60 * 60
+        last_wake = now - 30 * 60
+        sim.client._last_meaningful_state_ts = now - parked_for
+        sim.coord.last_data_timestamp = datetime.fromtimestamp(
+            now - parked_for, tz=timezone.utc
+        )
+        sim.coord.gps_fix.observe(
+            sim.coord._last_full_data, now=now - parked_for
+        )
+
+        # Even though the ordinary 12 h budget was recently spent, no fresh
+        # motion evidence means neither stale GPS nor parked stubs may wake it.
+        self.assertFalse(policy.should_escalate(
+            parked_for, last_wake, now
+        ))
+        self.assertFalse(policy.should_escalate_stale_gps(
+            parked_for, last_wake, now, sim.coord.last_motion_at
+        ))
+        for _ in range(4):
+            sim.push()  # exact duplicate stub: must not refresh meaningful age
+        sim.push(instant={"hvac": {"hvac_inner_temp_float": 24}})
+        sim.push(instant={"charge": {"battery_soc": 29}})
+        self.assertTrue(sim.coord.vehicle_parked)
+        self.assertEqual(sim.coord.last_motion_at, 0)
+        self.assertGreater(sim.coord.gps_fix.age_seconds(time.time()), 12 * 60 * 60)
+        self.assertEqual(len(self.sent), 0)
+
+        # Fresh D is a new drive episode, not inherited cached state. It
+        # bypasses the spent parked budget and requests a full-state snapshot.
+        sim.push(instant={"drive": {"shift_state": "D", "speed": 17}})
+        self.assertFalse(sim.coord.vehicle_parked)
+        self.assertGreater(sim.coord.last_motion_at, last_wake)
+        self.assert_full_state_publish()
+
+        # The tracker only becomes fresh when a new, valid GPS-bearing frame
+        # arrives; a drive indication alone cannot make cached coordinates new.
+        self.assertGreater(sim.coord.gps_fix.age_seconds(time.time()), 12 * 60 * 60)
+        sim.push(interval={"drive": {
+            "latitude": 32.20, "longitude": 34.50, "coordValid": 1,
+        }})
+        self.assertEqual(sim.coord.gps_fix.position, (32.20, 34.50))
+        self.assertLess(sim.coord.gps_fix.age_seconds(time.time()), 2)
+
 
 class MotionEvidenceAndGpsAge(unittest.TestCase):
     def setUp(self):
