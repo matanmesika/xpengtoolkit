@@ -188,6 +188,64 @@ class MotionEvidenceAndGpsAge(unittest.TestCase):
         self.assertFalse(policy.should_escalate_moving(2000, now - 3600, now, 0))
         self.assertFalse(policy.should_escalate(2000, now - 3600, now))
 
+    def test_rest_detects_motion_when_battery_mqtt_is_fresh_but_gps_is_stale(self):
+        sim = self.sim
+        sim.coord.last_energy_data_timestamp = datetime.now(timezone.utc)
+        sim.coord.last_data_timestamp = datetime.now(timezone.utc)
+        sim.coord._merge_widget_state_if_mqtt_stale(
+            {"odometer": {"total_mileage": 62301}, "charge": {"battery_soc": 28}}
+        )
+        self.assertGreater(sim.coord.last_motion_at, 0)
+        # The energy from MQTT remains authoritative.
+        self.assertEqual(
+            sim.coord._last_full_data["msg_content"]["instant"]["charge"]["battery_soc"], 30
+        )
+        # GPS is still old: only a real MQTT GPS frame can refresh it.
+        self.assertEqual(sim.coord.gps_fix.age_seconds(1800), 800)
+
+    def test_gps_stalls_while_tpms_hvac_battery_keep_arriving(self):
+        sim = self.sim
+        for soc, temp in ((29, 24), (28, 25), (27, 26)):
+            sim.push(instant={"charge": {"battery_soc": soc}})
+            sim.push(instant={"hvac": {"hvac_inner_temp_float": temp}})
+        self.assertEqual(sim.coord.gps_fix.age_seconds(3000), 2000)
+        self.assertEqual(sim.coord.vehicle_parked, True)
+        sim.coord.last_energy_data_timestamp = datetime.now(timezone.utc)
+        sim.coord._merge_widget_state_if_mqtt_stale(
+            {"odometer": {"total_mileage": 62301}}
+        )
+        now = time.time()
+        self.assertTrue(policy.should_escalate_stale_gps(
+            sim.coord.gps_fix.age_seconds(now),
+            last_escalation=now - 3600,
+            now=now,
+            last_motion_at=sim.coord.last_motion_at,
+        ))
+
+    def test_spontaneous_wake_drive_then_real_gps_clears_stale_location(self):
+        sim = self.sim
+        self.assertTrue(sim.coord.vehicle_parked)
+        sim.push(instant={"drive": {"shift_state": "D", "speed": 32}})
+        self.assertFalse(sim.coord.vehicle_parked)
+        sim.push(interval={"drive": {"latitude": 32.19, "longitude": 34.49, "coordValid": 1}})
+        self.assertEqual(sim.coord.gps_fix.position, (32.19, 34.49))
+        self.assertGreater(sim.coord.gps_fix.fixed_at, 1000)
+        sim.push(instant={"drive": {"shift_state": "P", "speed": 0}})
+        self.assertTrue(sim.coord.vehicle_parked)
+        self.assertEqual(sim.coord.last_motion_at, 0)
+
+    def test_fake_motion_from_a_cached_p_does_not_trigger_gps_wake(self):
+        sim = self.sim
+        sim.push(instant={"hvac": {"hvac_inner_temp_float": 24}})
+        now = time.time()
+        self.assertEqual(sim.coord.last_motion_at, 0)
+        self.assertFalse(policy.should_escalate_stale_gps(
+            fix_age_seconds=10 * 3600,
+            last_escalation=0,
+            now=now,
+            last_motion_at=sim.coord.last_motion_at,
+        ))
+
     def test_motion_escalation_is_once_per_episode(self):
         sim = self.sim
         sim.rest(odometer={"total_mileage": 62301})
