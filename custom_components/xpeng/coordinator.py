@@ -408,6 +408,10 @@ class XPengDataCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         replays an old state still ages towards the watchdog's force-upload.
         """
         has_fresh_energy_data = data.pop("has_fresh_energy_data", False)
+        # The MQTT client passes raw-frame provenance before merging old fields.
+        # Direct coordinator callers retain the legacy default semantics.
+        has_fresh_gps_data = data.pop("has_fresh_gps_data", True)
+        fresh_drive = data.pop("fresh_drive", None)
         odometer = odometer_from_state(data)
         if is_replay(odometer, self.max_odometer):
             _LOGGER.warning(
@@ -434,11 +438,14 @@ class XPengDataCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         data = with_previous_fix(data, self._last_full_data)
         self._last_full_data = data
         self.last_data_timestamp = datetime.now(timezone.utc)
-        self.gps_fix.observe(data, self.last_data_timestamp.timestamp())
+        self.gps_fix.observe(
+            data,
+            self.last_data_timestamp.timestamp() if has_fresh_gps_data else None,
+        )
         # Before _update_parked_consumption, which reads vehicle_parked; and
         # before the entities are notified, so a transition is logged with the
         # evidence that caused it (issue #3 diagnostics).
-        self.note_drive_evidence(data)
+        self.note_drive_evidence(data, fresh_drive=fresh_drive)
         if has_fresh_energy_data:
             self.last_energy_data_timestamp = self.last_data_timestamp
         self.state_is_restored = False
@@ -1286,17 +1293,28 @@ class XPengDataCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         """
         return drive_view(self._last_full_data)
 
-    def note_drive_evidence(self, data: dict[str, Any]) -> None:
-        """Record whether the frame just accepted showed the car moving.
+    def note_drive_evidence(
+        self, data: dict[str, Any], *, fresh_drive: dict[str, Any] | None = None
+    ) -> None:
+        """Only newly reported drive fields may change watchdog motion evidence.
 
-        A car that was moving when the data stopped cannot be woken by a
-        force-upload, so this is what lets the watchdog spend one outside the
-        12 h sleeping-car budget (watchdog_policy.should_escalate_moving). A
-        later frame showing P clears it, so a car that has since parked cannot
-        inherit the earlier drive's allowance. A frame with no drive block
-        leaves it alone: no evidence is not evidence of parking.
+        A merged partial always carries the cached gear and speed. Treating
+        those inherited fields as a fresh P would erase a REST odometer motion
+        observation (issue #3); treating an inherited D as fresh movement would
+        extend the motion allowance indefinitely. For MQTT calls, classify the
+        raw drive sections carried with the frame. Direct callers without
+        provenance retain the previous full-state behavior.
         """
-        view = drive_view(data)
+        if fresh_drive is None:
+            observed = data
+        else:
+            observed = {
+                "msg_content": {
+                    "instant": {"drive": fresh_drive.get("instant", {})},
+                    "interval": {"drive": fresh_drive.get("interval", {})},
+                }
+            }
+        view = drive_view(observed)
         if view["moving"]:
             self.last_motion_at = time.time()
         elif view["parked"]:
