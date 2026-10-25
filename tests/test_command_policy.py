@@ -141,6 +141,9 @@ class _Registry:
             for eid in entity_ids
         }
 
+    def async_get(self, entity_id):
+        return self.entities.get(entity_id)
+
 
 class _Permissions:
     def __init__(self, allowed):
