@@ -134,7 +134,9 @@ class ProductionHACallbackSimulation(unittest.TestCase):
             "datetime": datetime,
             "timezone": timezone,
             "_log_drive_evidence": lambda before, after, age: None,
-            "_LOGGER": types.SimpleNamespace(info=lambda *args: None),
+            "_LOGGER": types.SimpleNamespace(
+                info=lambda *args: None, debug=lambda *args: None,
+            ),
         }
         exec(compile(ast.fix_missing_locations(
             ast.Module(body=[fn], type_ignores=[])), "__init__.py", "exec"
