@@ -863,7 +863,16 @@ class XPengDataCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "Merge stale check: mqtt_stale=%s _last_full_data=%s",
             mqtt_stale, "set" if self._last_full_data else "None",
         )
-        if not mqtt_stale:
+        # Energy freshness and GPS freshness are independent. Even when MQTT
+        # keeps delivering new SOC/HVAC values, REST can expose movement while
+        # the tracker has been frozen for half an hour. Only grant the motion
+        # hint here; do not overwrite fresh energy data with REST.
+        gps_age = (
+            now.timestamp() - self.gps_fix.fixed_at
+            if self.gps_fix.fixed_at is not None else None
+        )
+        gps_stale = gps_age is not None and gps_age >= 30 * 60
+        if not mqtt_stale and not gps_stale:
             return
         # The fallback is only better than what we hold while it is *newer*.
         # A widget replaying an older snapshot (same wedged upstream) must not
@@ -888,10 +897,13 @@ class XPengDataCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if moving:
             self.last_motion_at = time.time()
             _LOGGER.info(
-                "REST fallback shows the car moving while the push stream is "
-                "silent (%s) — arming the bounded motion escalation",
-                motion_reason,
+                "REST fallback shows vehicle movement (%s; mqtt_energy_stale=%s "
+                "gps_stale=%s) — arming bounded recovery",
+                motion_reason, mqtt_stale, gps_stale,
             )
+        if not mqtt_stale:
+            # Do not replace fresh MQTT energy with a potentially older widget.
+            return
         # widget has top-level keys like charge/hvac/door/window/odometer/ext/fuelTank
         widget_sections = {
             k: v for k, v in widget.items()
