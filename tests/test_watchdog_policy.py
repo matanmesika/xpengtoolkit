@@ -353,5 +353,66 @@ class TestMotionEscalation(unittest.TestCase):
         )
 
 
+class TestGpsOnlyWatchdog(unittest.TestCase):
+    """GPS can be stale even when HVAC/SOC keeps MQTT marked 'fresh'."""
+
+    def test_gps_with_recent_movement_recovers_at_30_minutes(self):
+        now = 200_000.0
+        self.assertTrue(policy.should_escalate_stale_gps(
+            fix_age_seconds=30 * MINUTE,
+            last_escalation=now - 2 * HOUR,
+            now=now,
+            last_motion_at=now - MINUTE,
+        ))
+
+    def test_stale_gps_without_motion_must_not_wake_parked_car(self):
+        now = 200_000.0
+        self.assertFalse(policy.should_escalate_stale_gps(
+            20 * HOUR, 0, now, 0,
+        ))
+
+    def test_ancient_drive_cannot_wake_currently_parked_car(self):
+        now = 200_000.0
+        self.assertFalse(policy.should_escalate_stale_gps(
+            10 * HOUR, 0, now, now - HOUR,
+        ))
+
+    def test_unknown_gps_fix_age_does_not_trigger_recovery(self):
+        now = 200_000.0
+        self.assertFalse(policy.should_escalate_stale_gps(
+            None, 0, now, now - MINUTE,
+        ))
+
+    def test_recent_fix_does_not_trigger_recovery(self):
+        now = 200_000.0
+        self.assertFalse(policy.should_escalate_stale_gps(
+            30 * MINUTE - 1, 0, now, now - MINUTE,
+        ))
+
+    def test_recent_movement_does_not_bypass_10_minute_budget(self):
+        now = 200_000.0
+        self.assertFalse(policy.should_escalate_stale_gps(
+            HOUR, now - 5 * MINUTE, now, now - MINUTE,
+        ))
+
+    def test_same_motion_episode_cannot_escalate_twice(self):
+        now = 200_000.0
+        self.assertFalse(policy.should_escalate_stale_gps(
+            HOUR, now - 20 * MINUTE, now, now - 25 * MINUTE,
+        ))
+
+    def test_motion_from_the_future_is_not_evidence(self):
+        now = 200_000.0
+        self.assertFalse(policy.should_escalate_stale_gps(
+            HOUR, 0, now, now + 1,
+        ))
+
+    def test_watchdog_wires_gps_staleness_without_disabling_other_rules(self):
+        source = (_component.component_dir() / "__init__.py").read_text(encoding="utf-8")
+        self.assertIn("should_escalate_stale_gps(", source)
+        self.assertIn("gps_fix.age_seconds(", source)
+        self.assertIn("pending_escalation or motion_escalation or gps_motion_escalation", source)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
