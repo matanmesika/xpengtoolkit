@@ -211,6 +211,61 @@ class ProductionHACallbackSimulation(unittest.TestCase):
         self.assertTrue(sim.coord.vehicle_parked)
         self.assertEqual(sim.coord.last_motion_at, 0)
 
+    def test_full_recovery_flow_rest_motion_stale_gps_then_live_fix(self):
+        """Drive through REST fallback, watchdog policy and MQTT recovery.
+
+        This covers the failure shape where HVAC/SOC keep arriving, the GPS
+        fix ages independently, REST proves movement, and the bounded watchdog
+        is allowed one recovery request. A fresh MQTT fix must clear the stale
+        condition; a later P must restore parked behavior.
+        """
+        sim = self.sim
+        sim.client.set_state_callback(self.dispatch_parsed_state)
+        simulated_start = time.time()
+        sim.coord.gps_fix.observe(
+            sim.coord._last_full_data, now=simulated_start - 31 * 60
+        )
+
+        # REST sees distance advance while the accepted MQTT baseline still
+        # says parked. That is independent motion evidence, not a fresh GPS fix.
+        sim.rest(odometer={"total_mileage": 62301})
+        motion_at = sim.coord.last_motion_at
+        now = time.time()
+        self.assertGreater(motion_at, 0)
+        self.assertAlmostEqual(sim.coord.gps_fix.age_seconds(now), 31 * 60, delta=0.1)
+
+        # Repeating unrelated state packets must not refresh GPS or erase the
+        # REST motion evidence. This is the exact mixed-stream stall pattern.
+        sim.push(instant={"hvac": {"hvac_inner_temp_float": 24}})
+        sim.push(instant={"charge": {"battery_soc": 29}})
+        self.assertAlmostEqual(sim.coord.gps_fix.age_seconds(now), 31 * 60, delta=0.1)
+        self.assertEqual(sim.coord.last_motion_at, motion_at)
+        self.assertTrue(policy.should_escalate_stale_gps(
+            sim.coord.gps_fix.age_seconds(now), 0, now, motion_at
+        ))
+
+        # Once the bounded recovery has been spent, the same evidence cannot
+        # force another request immediately. The parked-car policy remains safe.
+        self.assertFalse(policy.should_escalate_stale_gps(
+            sim.coord.gps_fix.age_seconds(now + 1), now, now + 1, motion_at
+        ))
+        sim.push(instant={"drive": {"shift_state": "D", "speed": 12}})
+        self.assertFalse(sim.coord.vehicle_parked)
+        self.assert_full_state_publish()
+
+        # A real coordinate-bearing MQTT frame is what resolves the GPS stall.
+        sim.push(interval={"drive": {
+            "latitude": 32.19, "longitude": 34.49, "coordValid": 1,
+        }})
+        self.assertEqual(sim.coord.gps_fix.position, (32.19, 34.49))
+        self.assertLess(sim.coord.gps_fix.age_seconds(time.time()), 2)
+
+        # Fresh P terminates the motion episode; a stale fix alone cannot wake
+        # a genuinely parked car after its evidence expires.
+        sim.push(instant={"drive": {"shift_state": "P", "speed": 0}})
+        self.assertTrue(sim.coord.vehicle_parked)
+        self.assertEqual(sim.coord.last_motion_at, 0)
+
 
 class MotionEvidenceAndGpsAge(unittest.TestCase):
     def setUp(self):
