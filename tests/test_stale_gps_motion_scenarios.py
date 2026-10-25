@@ -1,0 +1,200 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""Synthetic G6 telemetry regression: parked -> REST-only motion -> MQTT recovery.
+
+Run without Home Assistant, vehicle credentials or a car:
+    python -m unittest tests/test_stale_gps_motion_scenarios.py -v
+    python -m unittest discover -s tests
+
+Exercises the *real* MQTT parser, coordinator, drive evidence and watchdog policy
+with fake HVAC, charge, TPMS, gear and GPS sensor messages. No real VIN/GPS.
+"""
+from __future__ import annotations
+
+import importlib.util
+import sys
+import time
+import unittest
+from datetime import datetime, timedelta, timezone
+
+from test_energy_guard import _coordinator_with
+from test_mqtt_state_delivery import _Msg, _state, mqtt_client
+import _component
+
+
+def _policy():
+    path = _component.module_path("watchdog_policy.py")
+    spec = importlib.util.spec_from_file_location("xpeng_synthetic_policy", path)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+policy = _policy()
+
+VIN = "TESTVIN0000000000"
+BASE = {
+    "vin": VIN,
+    "msg_content": {
+        "code": 200,
+        "instant": {
+            "ext": {"vehicleMode": 1},
+            "drive": {"shift_state": 4, "speed": 0},
+            "odometer": {"total_mileage": 62234},
+            "charge": {"battery_soc": 30},
+            "hvac": {"hvac_inner_temp_float": 23},
+            "tpms": {"fl": 275},
+        },
+        "interval": {
+            "drive": {
+                "latitude": 32.123,
+                "longitude": 34.456,
+                "coordValid": 1,
+                "speed": 0,
+            }
+        },
+    },
+}
+
+
+class FakeG6:
+    """Minimal production-class stack; mocked transport and simulated sensors."""
+
+    def __init__(self):
+        import copy
+
+        self.coord = _coordinator_with(copy.deepcopy(BASE))
+        self.coord.max_odometer = 62234
+        self.coord.gps_fix.observe(self.coord._last_full_data, now=1000.0)
+        self.client = mqtt_client.XPengMQTTClient(
+            client_id="xmart:app:12345678:fake",
+            password="not-a-real-password",
+            server="127.0.0.1:8885",
+            user_id="12345678",
+        )
+        self.client._last_full_content = copy.deepcopy(BASE["msg_content"])
+        self.client.set_state_callback(self.coord.set_vehicle_data)
+        self.coord.set_baseline_sink(self.client.adopt_state)
+
+    def push(self, **payload):
+        self.client._on_message(None, None, _Msg(_state(**payload)))
+
+    def rest(self, **widget):
+        self.coord.last_energy_data_timestamp = (
+            datetime.now(timezone.utc) - timedelta(hours=2)
+        )
+        self.coord.last_data_timestamp = (
+            datetime.now(timezone.utc) - timedelta(hours=2)
+        )
+        self.coord._merge_widget_state_if_mqtt_stale(widget)
+
+
+class MotionEvidenceAndGpsAge(unittest.TestCase):
+    def setUp(self):
+        self.sim = FakeG6()
+
+    def test_parked_hvac_does_not_fake_a_new_gps_fix(self):
+        sim = self.sim
+        sim.push(instant={"hvac": {"hvac_inner_temp_float": 24}})
+        self.assertEqual(sim.coord.gps_fix.position, (32.123, 34.456))
+        self.assertEqual(sim.coord.gps_fix.age_seconds(1600), 600)
+        self.assertEqual(sim.coord.vehicle_parked, True)
+
+    def test_pure_battery_update_does_not_make_cached_gear_or_gps_fresh(self):
+        sim = self.sim
+        sim.rest(odometer={"total_mileage": 62301})
+        motion_at = sim.coord.last_motion_at
+        self.assertGreater(motion_at, 0)
+        sim.push(instant={"charge": {"battery_soc": 29}})
+        self.assertEqual(sim.coord.last_motion_at, motion_at)
+        self.assertEqual(sim.coord.gps_fix.age_seconds(1500), 500)
+
+    def test_tpms_and_hvac_do_not_clear_rest_motion(self):
+        sim = self.sim
+        sim.rest(odometer={"total_mileage": 62301})
+        motion_at = sim.coord.last_motion_at
+        sim.push(instant={"tpms": {"fl": 273}})
+        sim.push(instant={"hvac": {"hvac_inner_temp_float": 22}})
+        self.assertEqual(sim.coord.last_motion_at, motion_at)
+        now = time.time()
+        self.assertTrue(
+            policy.should_escalate_moving(
+                silence_seconds=1801,
+                last_escalation=now - 3600,
+                now=now,
+                last_motion_at=motion_at,
+            )
+        )
+
+    def test_real_d_gear_and_then_real_p_gear_update_motion(self):
+        sim = self.sim
+        sim.push(instant={"drive": {"shift_state": "D", "speed": 15}})
+        self.assertFalse(sim.coord.vehicle_parked)
+        self.assertGreater(sim.coord.last_motion_at, 0)
+        sim.push(instant={"drive": {"shift_state": "P", "speed": 0}})
+        self.assertTrue(sim.coord.vehicle_parked)
+        self.assertEqual(sim.coord.last_motion_at, 0)
+
+    def test_real_p_frame_can_end_rest_motion_without_fake_p_from_cached_data(self):
+        sim = self.sim
+        sim.rest(odometer={"total_mileage": 62301})
+        sim.push(instant={"hvac": {"hvac_inner_temp_float": 25}})
+        self.assertGreater(sim.coord.last_motion_at, 0)
+        sim.push(instant={"drive": {"shift_state": "P"}, "charge": {"battery_soc": 29}})
+        self.assertEqual(sim.coord.last_motion_at, 0)
+
+    def test_new_interval_speed_is_motion_even_if_cached_gear_is_p(self):
+        sim = self.sim
+        sim.push(interval={"drive": {"speed": 12}})
+        self.assertTrue(sim.coord.vehicle_parked)
+        self.assertGreater(sim.coord.last_motion_at, 0)
+        earlier = sim.coord.last_motion_at
+        sim.push(instant={"hvac": {"hvac_inner_temp_float": 26}})
+        self.assertEqual(earlier, sim.coord.last_motion_at)
+
+    def test_invalid_gps_then_new_valid_fix(self):
+        sim = self.sim
+        sim.push(interval={"drive": {
+            "latitude": 31.9, "longitude": 35.1, "coordValid": 0
+        }})
+        self.assertEqual(sim.coord.gps_fix.position, (32.123, 34.456))
+        self.assertIs(sim.coord.gps_fix.coord_valid, False)
+        self.assertEqual(sim.coord.gps_fix.age_seconds(1600), 600)
+        sim.push(interval={"drive": {
+            "latitude": 31.9, "longitude": 35.1, "coordValid": 1
+        }})
+        self.assertEqual(sim.coord.gps_fix.position, (31.9, 35.1))
+        self.assertIs(sim.coord.gps_fix.coord_valid, True)
+        self.assertGreater(sim.coord.gps_fix.fixed_at, 1000)
+
+    def test_repeated_309_byte_stubs_do_not_reset_gps_age_or_motion(self):
+        sim = self.sim
+        sim.rest(odometer={"total_mileage": 62301})
+        motion_at = sim.coord.last_motion_at
+        stamped = sim.client.last_meaningful_state_ts
+        for _ in range(5):
+            sim.push()
+        self.assertEqual(sim.client.last_meaningful_state_ts, stamped)
+        self.assertEqual(sim.coord.last_motion_at, motion_at)
+        self.assertEqual(sim.coord.gps_fix.age_seconds(1600), 600)
+
+    def test_parked_vehicle_keeps_12_hour_safety_budget(self):
+        sim = self.sim
+        sim.push(instant={"charge": {"battery_soc": 29}})
+        self.assertEqual(sim.coord.last_motion_at, 0)
+        now = time.time()
+        self.assertFalse(policy.should_escalate_moving(2000, now - 3600, now, 0))
+        self.assertFalse(policy.should_escalate(2000, now - 3600, now))
+
+    def test_motion_escalation_is_once_per_episode(self):
+        sim = self.sim
+        sim.rest(odometer={"total_mileage": 62301})
+        motion_at = sim.coord.last_motion_at
+        self.assertTrue(policy.should_escalate_moving(1801, 0, motion_at + 1, motion_at))
+        self.assertFalse(policy.should_escalate_moving(3600, motion_at + 1, motion_at + 700, motion_at))
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)
