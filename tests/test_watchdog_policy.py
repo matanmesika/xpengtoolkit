@@ -349,7 +349,7 @@ class TestMotionEscalation(unittest.TestCase):
         self.assertIn("should_escalate(", source)
         self.assertIn("should_escalate_moving(", source)
         self.assertIn(
-            "escalation_allowed = pending_escalation or motion_escalation", source
+            "pending_escalation or motion_escalation or gps_motion_escalation", source
         )
 
 
