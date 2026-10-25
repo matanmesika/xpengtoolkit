@@ -1272,6 +1272,25 @@ class XPengMQTTClient:
             # package and as a top-level module by tools/ and tests/, and has no
             # project imports of its own.
             raw_instant = content.get("instant", {})
+            # Carry field provenance alongside the *merged* snapshot. A partial
+            # HVAC/charge ping inherits old P/GPS from the baseline, but MUST NOT
+            # turn those inherited values into a new gear report or GPS fix.
+            raw_drive = raw_instant.get("drive") if isinstance(raw_instant, dict) else None
+            raw_interval = content.get("interval")
+            raw_interval_drive = (
+                raw_interval.get("drive") if isinstance(raw_interval, dict) else None
+            )
+            fresh_drive = {
+                "instant": raw_drive if isinstance(raw_drive, dict) else {},
+                "interval": (
+                    raw_interval_drive if isinstance(raw_interval_drive, dict) else {}
+                ),
+            }
+            has_fresh_gps_data = (
+                isinstance(raw_interval_drive, dict)
+                and "latitude" in raw_interval_drive
+                and "longitude" in raw_interval_drive
+            )
             instant = raw_instant
             # Read the baseline once, under the lock: the event loop may adopt
             # the coordinator's REST-fallback merge at any moment (adopt_state),
@@ -1329,6 +1348,8 @@ class XPengMQTTClient:
                 vehicle_data: dict[str, Any] = {
                     "vin": data.get("target_id", ""),
                     "msg_content": content,
+                    "fresh_drive": fresh_drive,
+                    "has_fresh_gps_data": has_fresh_gps_data,
                     "has_fresh_energy_data": bool(
                         instant.get("charge") or instant.get("odometer")
                     ),
@@ -1408,6 +1429,8 @@ class XPengMQTTClient:
                 vehicle_data = {
                     "vin": data.get("target_id", ""),
                     "msg_content": merged,
+                    "fresh_drive": fresh_drive,
+                    "has_fresh_gps_data": has_fresh_gps_data,
                     # Only true if THIS message's own instant carried fresh
                     # charge/odometer data — a partial that only refreshes
                     # e.g. door/window/ext must not be mistaken for a fresh
