@@ -1272,6 +1272,77 @@ class XPengMQTTClient:
             # package and as a top-level module by tools/ and tests/, and has no
             # project imports of its own.
             raw_instant = content.get("instant", {})
+            # Carry field provenance alongside the *merged* snapshot. A partial
+            # HVAC/charge ping inherits old P/GPS from the baseline, but MUST NOT
+            # turn those inherited values into a new gear report or GPS fix.
+            raw_drive = raw_instant.get("drive") if isinstance(raw_instant, dict) else None
+            raw_interval = content.get("interval")
+            raw_interval_drive = (
+                raw_interval.get("drive") if isinstance(raw_interval, dict) else None
+            )
+            fresh_drive = {
+                "instant": raw_drive if isinstance(raw_drive, dict) else {},
+                "interval": (
+                    raw_interval_drive if isinstance(raw_interval_drive, dict) else {}
+                ),
+            }
+            retained = bool(getattr(msg, "retain", False))
+            mqtt_diagnostics = {
+                "payload_bytes": payload_len,
+                "retained": retained,
+                "received_at": time.time(),
+                "raw_shift_present": (
+                    isinstance(raw_drive, dict) and "shift_state" in raw_drive
+                ),
+                "raw_shift_state": (
+                    raw_drive.get("shift_state")
+                    if isinstance(raw_drive, dict) else None
+                ),
+                "raw_instant_speed_present": (
+                    isinstance(raw_drive, dict) and "speed" in raw_drive
+                ),
+                "raw_instant_speed": (
+                    raw_drive.get("speed")
+                    if isinstance(raw_drive, dict) else None
+                ),
+                "raw_interval_speed_present": (
+                    isinstance(raw_interval_drive, dict)
+                    and "speed" in raw_interval_drive
+                ),
+                "raw_interval_speed": (
+                    raw_interval_drive.get("speed")
+                    if isinstance(raw_interval_drive, dict) else None
+                ),
+                "raw_gps_present": (
+                    isinstance(raw_interval_drive, dict)
+                    and "latitude" in raw_interval_drive
+                    and "longitude" in raw_interval_drive
+                ),
+                "raw_coord_valid": (
+                    raw_interval_drive.get("coordValid")
+                    if isinstance(raw_interval_drive, dict) else None
+                ),
+            }
+            _LOGGER.debug(
+                "MQTT drive frame: bytes=%s retained=%s raw_shift_present=%s "
+                "raw_shift=%r raw_instant_speed_present=%s raw_instant_speed=%r "
+                "raw_interval_speed_present=%s raw_interval_speed=%r "
+                "gps_fields_present=%s coord_valid=%r",
+                payload_len, retained,
+                mqtt_diagnostics["raw_shift_present"],
+                mqtt_diagnostics["raw_shift_state"],
+                mqtt_diagnostics["raw_instant_speed_present"],
+                mqtt_diagnostics["raw_instant_speed"],
+                mqtt_diagnostics["raw_interval_speed_present"],
+                mqtt_diagnostics["raw_interval_speed"],
+                mqtt_diagnostics["raw_gps_present"],
+                mqtt_diagnostics["raw_coord_valid"],
+            )
+            has_fresh_gps_data = (
+                isinstance(raw_interval_drive, dict)
+                and "latitude" in raw_interval_drive
+                and "longitude" in raw_interval_drive
+            )
             instant = raw_instant
             # Read the baseline once, under the lock: the event loop may adopt
             # the coordinator's REST-fallback merge at any moment (adopt_state),
@@ -1296,6 +1367,7 @@ class XPengMQTTClient:
                 for k in ("charge", "drive", "power", "odometer", "door")
             )
             is_full = has_ext and has_vehicle_data
+            mqtt_diagnostics["shape"] = "full" if is_full else "partial"
             # A first response can contain useful state without the ext block.
             # Requiring a full baseline first discarded those values forever on
             # installs that only received partial pushes. Empty sleeping-car
@@ -1329,6 +1401,9 @@ class XPengMQTTClient:
                 vehicle_data: dict[str, Any] = {
                     "vin": data.get("target_id", ""),
                     "msg_content": content,
+                    "fresh_drive": fresh_drive,
+                    "mqtt_diagnostics": mqtt_diagnostics,
+                    "has_fresh_gps_data": has_fresh_gps_data,
                     "has_fresh_energy_data": bool(
                         instant.get("charge") or instant.get("odometer")
                     ),
@@ -1408,6 +1483,9 @@ class XPengMQTTClient:
                 vehicle_data = {
                     "vin": data.get("target_id", ""),
                     "msg_content": merged,
+                    "fresh_drive": fresh_drive,
+                    "mqtt_diagnostics": mqtt_diagnostics,
+                    "has_fresh_gps_data": has_fresh_gps_data,
                     # Only true if THIS message's own instant carried fresh
                     # charge/odometer data — a partial that only refreshes
                     # e.g. door/window/ext must not be mistaken for a fresh

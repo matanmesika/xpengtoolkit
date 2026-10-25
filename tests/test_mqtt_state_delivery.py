@@ -142,6 +142,33 @@ class AsleepAckIsNotData(unittest.TestCase):
 
 
 class RealChangesStillArrive(unittest.TestCase):
+    def test_drive_frame_carries_privacy_safe_raw_diagnostics(self):
+        client, calls = _client()
+        message = _Msg(_state(
+            instant={"drive": {"shift_state": 2, "speed": -4}},
+            interval={"drive": {
+                "speed": -4, "latitude": 32.1, "longitude": 34.2,
+                "coordValid": 1,
+            }},
+        ))
+        message.retain = True
+
+        client._on_message(None, None, message)
+
+        self.assertEqual(len(calls), 1)
+        diagnostics = calls[0]["mqtt_diagnostics"]
+        self.assertTrue(diagnostics["retained"])
+        self.assertEqual(diagnostics["raw_shift_state"], 2)
+        self.assertTrue(diagnostics["raw_shift_present"])
+        self.assertEqual(diagnostics["raw_instant_speed"], -4)
+        self.assertEqual(diagnostics["raw_interval_speed"], -4)
+        self.assertTrue(diagnostics["raw_gps_present"])
+        self.assertEqual(diagnostics["raw_coord_valid"], 1)
+        self.assertEqual(diagnostics["shape"], "partial")
+        self.assertGreater(diagnostics["payload_bytes"], 0)
+        self.assertNotIn("latitude", diagnostics)
+        self.assertNotIn("longitude", diagnostics)
+
     def test_a_changed_section_reaches_the_coordinator(self):
         client, calls = _client()
         before = client.last_meaningful_state_ts

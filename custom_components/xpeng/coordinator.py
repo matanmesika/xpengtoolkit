@@ -158,6 +158,11 @@ class XPengDataCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         #: force-upload cannot turn into a wake - see
         #: watchdog_policy.should_escalate_moving and drive_evidence.py.
         self.last_motion_at: float = 0.0
+        # Fresh MQTT drive evidence only. Unlike the REST odometer hint, this
+        # can justify an immediate active query while the car is already awake.
+        # Expire it after 120s so a missing final P cannot make a sleeping car
+        # receive force-uploads forever.
+        self.mqtt_motion_until: float = 0.0
         #: The last position that was actually a GPS fix, and how old it is.
         #: ``interval.drive.coordValid`` says whether a frame's coordinates are a
         #: current fix or the car's last known position; see drive_evidence.py.
@@ -408,6 +413,10 @@ class XPengDataCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         replays an old state still ages towards the watchdog's force-upload.
         """
         has_fresh_energy_data = data.pop("has_fresh_energy_data", False)
+        # The MQTT client passes raw-frame provenance before merging old fields.
+        # Direct coordinator callers retain the legacy default semantics.
+        has_fresh_gps_data = data.pop("has_fresh_gps_data", True)
+        fresh_drive = data.pop("fresh_drive", None)
         odometer = odometer_from_state(data)
         if is_replay(odometer, self.max_odometer):
             _LOGGER.warning(
@@ -434,11 +443,14 @@ class XPengDataCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         data = with_previous_fix(data, self._last_full_data)
         self._last_full_data = data
         self.last_data_timestamp = datetime.now(timezone.utc)
-        self.gps_fix.observe(data, self.last_data_timestamp.timestamp())
+        self.gps_fix.observe(
+            data,
+            self.last_data_timestamp.timestamp() if has_fresh_gps_data else None,
+        )
         # Before _update_parked_consumption, which reads vehicle_parked; and
         # before the entities are notified, so a transition is logged with the
         # evidence that caused it (issue #3 diagnostics).
-        self.note_drive_evidence(data)
+        self.note_drive_evidence(data, fresh_drive=fresh_drive)
         if has_fresh_energy_data:
             self.last_energy_data_timestamp = self.last_data_timestamp
         self.state_is_restored = False
@@ -856,7 +868,16 @@ class XPengDataCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "Merge stale check: mqtt_stale=%s _last_full_data=%s",
             mqtt_stale, "set" if self._last_full_data else "None",
         )
-        if not mqtt_stale:
+        # Energy freshness and GPS freshness are independent. Even when MQTT
+        # keeps delivering new SOC/HVAC values, REST can expose movement while
+        # the tracker has been frozen for half an hour. Only grant the motion
+        # hint here; do not overwrite fresh energy data with REST.
+        gps_age = (
+            now.timestamp() - self.gps_fix.fixed_at
+            if self.gps_fix.fixed_at is not None else None
+        )
+        gps_stale = gps_age is not None and gps_age >= 30 * 60
+        if not mqtt_stale and not gps_stale:
             return
         # The fallback is only better than what we hold while it is *newer*.
         # A widget replaying an older snapshot (same wedged upstream) must not
@@ -881,10 +902,13 @@ class XPengDataCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if moving:
             self.last_motion_at = time.time()
             _LOGGER.info(
-                "REST fallback shows the car moving while the push stream is "
-                "silent (%s) — arming the bounded motion escalation",
-                motion_reason,
+                "REST fallback shows the car moving (%s; mqtt_energy_stale=%s "
+                "gps_stale=%s) — arming bounded recovery",
+                motion_reason, mqtt_stale, gps_stale,
             )
+        if not mqtt_stale:
+            # Do not replace fresh MQTT energy with a potentially older widget.
+            return
         # widget has top-level keys like charge/hvac/door/window/odometer/ext/fuelTank
         widget_sections = {
             k: v for k, v in widget.items()
@@ -1275,32 +1299,58 @@ class XPengDataCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         means "no evidence" (None). Callers treat None as *not moving* - see
         poll_status.is_active - so this is deliberately conservative.
         """
-        return drive_view(self._last_full_data)["parked"]
+        return self.parking_view["parked"]
 
     @property
     def parking_view(self) -> dict[str, Any]:
-        """The parked verdict with the fields and reason behind it.
+        """Combine held instant gear with short-lived fresh MQTT motion evidence.
 
-        For diagnostics only: a user on issue #3 asked which field decided the
-        verdict, and the capture they had could not say.
+        A positive NEW interval speed wins temporarily over an inherited P.
+        It expires after 120 seconds or is cleared by a fresh P frame, so a
+        missed parking notification never causes permanent active polling.
         """
-        return drive_view(self._last_full_data)
+        observed = drive_view(self._last_full_data)
+        if self.mqtt_motion_is_recent and observed["parked"] is not False:
+            return {
+                **observed, "parked": False,
+                "reason": "recent raw MQTT D/speed (overrides cached P)",
+            }
+        return observed
 
-    def note_drive_evidence(self, data: dict[str, Any]) -> None:
-        """Record whether the frame just accepted showed the car moving.
+    def note_drive_evidence(
+        self, data: dict[str, Any], *, fresh_drive: dict[str, Any] | None = None
+    ) -> None:
+        """Only newly reported drive fields may change watchdog motion evidence.
 
-        A car that was moving when the data stopped cannot be woken by a
-        force-upload, so this is what lets the watchdog spend one outside the
-        12 h sleeping-car budget (watchdog_policy.should_escalate_moving). A
-        later frame showing P clears it, so a car that has since parked cannot
-        inherit the earlier drive's allowance. A frame with no drive block
-        leaves it alone: no evidence is not evidence of parking.
+        A merged partial always carries the cached gear and speed. Treating
+        those inherited fields as a fresh P would erase a REST odometer motion
+        observation (issue #3); treating an inherited D as fresh movement would
+        extend the motion allowance indefinitely. For MQTT calls, classify the
+        raw drive sections carried with the frame. Direct callers without
+        provenance retain the previous full-state behavior.
         """
-        view = drive_view(data)
+        if fresh_drive is None:
+            observed = data
+        else:
+            observed = {
+                "msg_content": {
+                    "instant": {"drive": fresh_drive.get("instant", {})},
+                    "interval": {"drive": fresh_drive.get("interval", {})},
+                }
+            }
+        view = drive_view(observed)
         if view["moving"]:
-            self.last_motion_at = time.time()
+            now = time.time()
+            self.last_motion_at = now
+            self.mqtt_motion_until = now + 120
         elif view["parked"]:
             self.last_motion_at = 0.0
+            self.mqtt_motion_until = 0.0
+
+    @property
+    def mqtt_motion_is_recent(self) -> bool:
+        """Recent *incoming MQTT* D/speed, not REST or inherited cached fields."""
+        return time.time() < getattr(self, "mqtt_motion_until", 0.0)
 
     @property
     def external_charging_hint(self) -> bool:

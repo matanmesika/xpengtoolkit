@@ -527,10 +527,16 @@ if HAVE_AIOHTTP:  # pragma: no branch - the whole suite is skipped without it
         const = types.ModuleType("custom_components.xpeng.const")
         const.DOMAIN = "xpeng"
         sys.modules["custom_components.xpeng.const"] = const
+        # Other test modules install lightweight XPeng module stubs in
+        # sys.modules. Reuse of one of those stubs made this integration test
+        # order-dependent and could mask the real coordinator behavior.
+        for name in (
+            "command_policy", "drive_evidence", "energy_guard", "replay_guard",
+            "vin_descriptor", "coordinator",
+        ):
+            sys.modules.pop(f"custom_components.xpeng.{name}", None)
         for name in ("command_policy", "vin_descriptor", "coordinator"):
             full = f"custom_components.xpeng.{name}"
-            if full in sys.modules:
-                continue
             spec = importlib.util.spec_from_file_location(full, PKG / f"{name}.py")
             module = importlib.util.module_from_spec(spec)
             sys.modules[full] = module
@@ -627,12 +633,23 @@ if HAVE_AIOHTTP:  # pragma: no branch - the whole suite is skipped without it
                 self.coordinator.async_set_updated_data(
                     {"code": 200, "msg_content": DRIVING_RAW}
                 )
-                frames = []
-                for _ in range(3):
-                    message = await asyncio.wait_for(ws.receive_json(), timeout=5)
-                    frames.append(decode_stream_value(message["value"]))
-                self.assertEqual(frames[-1]["shift_state"], "D")
-                self.assertGreater(frames[-1]["speed"], 0)
+                # A heartbeat may publish the cached P frame after the D
+                # update. Assert that the coordinator's push reaches the
+                # stream within the deadline instead of assuming the last of
+                # an arbitrary number of frames must still be the newest.
+                driving_frame = None
+                loop = asyncio.get_running_loop()
+                deadline = loop.time() + 5
+                while loop.time() < deadline and driving_frame is None:
+                    message = await asyncio.wait_for(
+                        ws.receive_json(), timeout=max(0.01, deadline - loop.time())
+                    )
+                    frame = decode_stream_value(message["value"])
+                    if frame["shift_state"] == "D" and frame["speed"] > 0:
+                        driving_frame = frame
+                self.assertIsNotNone(
+                    driving_frame, "the MQTT-like coordinator push never reached the stream"
+                )
 
 
 else:

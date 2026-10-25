@@ -25,6 +25,7 @@ from .watchdog_policy import (
     ESCALATE_BACKOFF_SECONDS,
     should_escalate,
     should_escalate_moving,
+    should_escalate_stale_gps,
 )
 
 from .const import (
@@ -1011,21 +1012,65 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     def _handle_vehicle_state(data: dict[str, Any], was_parked: bool | None) -> None:
         """Update coordinator and handle parked→driving transition."""
+        # The MQTT parser keeps raw-field provenance beside the merged state.
+        # Preserve it for diagnostics, then remove it before the coordinator
+        # accepts/persists the vehicle snapshot.
+        fresh_drive = data.get("fresh_drive") or {}
+        raw_instant_drive = fresh_drive.get("instant") or {}
+        raw_interval_drive = fresh_drive.get("interval") or {}
+        mqtt_diagnostics = data.pop("mqtt_diagnostics", {})
         before = coordinator.parking_view
+        previous_mqtt_motion = coordinator.mqtt_motion_is_recent
         previous_timestamp = coordinator.last_data_timestamp
         previous_data_age = (
             (datetime.now(timezone.utc) - previous_timestamp).total_seconds()
             if previous_timestamp is not None
             else None
         )
-        coordinator.set_vehicle_data(data)
-        _log_drive_evidence(before, coordinator.parking_view, previous_data_age)
-        # If car just started moving, force immediate query
-        if was_parked and coordinator.vehicle_parked is False:
-            _LOGGER.info("Vehicle transitioned from parked to driving — forcing query")
-            # async_add_executor_job already schedules the job and returns a
-            # Future — do NOT wrap it in async_create_task (expects a coroutine).
-            hass.async_add_executor_job(mqtt_client.send_query, vin)
+        accepted = coordinator.set_vehicle_data(data)
+        after = coordinator.parking_view
+        _LOGGER.debug(
+            "Drive frame result: bytes=%s retained=%s shape=%s "
+            "raw_shift_present=%s raw_shift=%r raw_instant_speed=%r "
+            "raw_interval_speed=%r raw_gps_present=%s coord_valid=%r "
+            "merged_shift_before=%r merged_shift_after=%r parked_before=%s "
+            "parked_after=%s accepted=%s previous_data_age_s=%s",
+            mqtt_diagnostics.get("payload_bytes"),
+            mqtt_diagnostics.get("retained"),
+            mqtt_diagnostics.get("shape"),
+            mqtt_diagnostics.get("raw_shift_present", "shift_state" in raw_instant_drive),
+            mqtt_diagnostics.get("raw_shift_state", raw_instant_drive.get("shift_state")),
+            mqtt_diagnostics.get("raw_instant_speed", raw_instant_drive.get("speed")),
+            mqtt_diagnostics.get("raw_interval_speed", raw_interval_drive.get("speed")),
+            mqtt_diagnostics.get("raw_gps_present", (
+                "latitude" in raw_interval_drive and "longitude" in raw_interval_drive
+            )),
+            mqtt_diagnostics.get("raw_coord_valid", raw_interval_drive.get("coordValid")),
+            before.get("shift_state"),
+            after.get("shift_state"),
+            before.get("parked"),
+            after.get("parked"),
+            accepted,
+            round(previous_data_age, 1) if previous_data_age is not None else None,
+        )
+        _log_drive_evidence(before, after, previous_data_age)
+        if accepted is False:
+            return
+        # A new D/positive speed is proof the car is awake. Request a FULL
+        # snapshot immediately rather than a passive query that can return a
+        # stub. The recent-motion flag is sourced only from this frame's raw
+        # fields and expires after 120s if no new drive reports arrive.
+        if (
+            (was_parked and coordinator.vehicle_parked is False)
+            or (not previous_mqtt_motion and coordinator.mqtt_motion_is_recent)
+        ):
+            _LOGGER.info(
+                "Fresh parked-to-driving / speed transition — force-upload "
+                "while vehicle is awake"
+            )
+            hass.async_add_executor_job(
+                mqtt_client.send_command, vin, 19, {"cmd_type": 2}, 2
+            )
 
     mqtt_client.set_state_callback(_on_vehicle_state)
     # The REST fallback merge happens in the coordinator, so the client's own
@@ -1283,7 +1328,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     async def _send_periodic_query(_now: Any) -> None:
         now = time.time()
-        active = coordinator.is_charging or coordinator.vehicle_parked is False
+        recent_mqtt_motion = coordinator.mqtt_motion_is_recent
+        active = (
+            coordinator.is_charging
+            or coordinator.vehicle_parked is False
+            or recent_mqtt_motion
+        )
         # An external charging hint raises the cadence but NOT the kind of query:
         # `active` alone decides whether we may force-upload, because that is the
         # only thing here that can wake a car, and the hint is someone else's word
@@ -1293,7 +1343,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         # the session started, after hours of stubs).
         hint = coordinator.external_charging_hint
         min_gap = poll_status.query_interval_seconds(
-            coordinator.vehicle_parked,
+            False if recent_mqtt_motion else coordinator.vehicle_parked,
             coordinator.is_charging,
             scan_interval,
             parked_scan_interval,
@@ -1678,7 +1728,20 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 time.time(),
                 coordinator.last_motion_at,
             )
-            escalation_allowed = pending_escalation or motion_escalation
+            # A frozen position is not the same as a silent MQTT socket.
+            # HVAC/SOC updates can keep generic state freshness near zero while
+            # no new GPS fix arrives. Trigger only with RECENT motion evidence:
+            # never wake an idle, parked car solely to obtain GPS coordinates.
+            gps_fix_age = coordinator.gps_fix.age_seconds(time.time())
+            gps_motion_escalation = should_escalate_stale_gps(
+                gps_fix_age,
+                watchdog_state["last_escalation"],
+                time.time(),
+                coordinator.last_motion_at,
+            )
+            escalation_allowed = (
+                pending_escalation or motion_escalation or gps_motion_escalation
+            )
             escalated_now = poll_status.is_escalated(
                 stale,
                 watchdog_state["last_escalation"],
@@ -1836,7 +1899,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     ),
                 )
             return
-        if motion_escalation:
+        if gps_motion_escalation and not motion_escalation:
+            _LOGGER.warning(
+                "Watchdog: GPS fix %.0fmin old despite other MQTT telemetry; "
+                "recent motion evidence %.0fmin ago — sending ONE bounded "
+                "force-upload to recover the location",
+                gps_fix_age / 60,
+                (now_ts - coordinator.last_motion_at) / 60,
+            )
+        elif motion_escalation:
             _LOGGER.warning(
                 "Watchdog: %.0fmin without data and the last accepted state said "
                 "the car was moving (%.0fmin before the silence) — sending ONE "
