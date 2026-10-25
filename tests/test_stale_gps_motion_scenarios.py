@@ -95,6 +95,33 @@ class MotionEvidenceAndGpsAge(unittest.TestCase):
     def setUp(self):
         self.sim = FakeG6()
 
+    def test_new_mqtt_d_and_interval_speed_enable_short_lived_active_poll(self):
+        sim = self.sim
+        self.assertFalse(sim.coord.mqtt_motion_is_recent)
+        sim.push(instant={"drive": {"shift_state": "D", "speed": 0}})
+        self.assertTrue(sim.coord.mqtt_motion_is_recent)
+        sim.push(instant={"drive": {"shift_state": "P", "speed": 0}})
+        self.assertFalse(sim.coord.mqtt_motion_is_recent)
+        # Speed-only motion is useful even while the cached instant gear is P.
+        sim.push(interval={"drive": {"speed": 14}})
+        self.assertTrue(sim.coord.mqtt_motion_is_recent)
+        # Unrelated partials do not extend the activity window.
+        deadline = sim.coord.mqtt_motion_until
+        sim.push(instant={"hvac": {"hvac_inner_temp_float": 28}})
+        self.assertEqual(sim.coord.mqtt_motion_until, deadline)
+        sim.coord.mqtt_motion_until = time.time() - 1
+        self.assertFalse(sim.coord.mqtt_motion_is_recent)
+        # Once expired the car receives no unbounded "driving" allowance.
+        sim.push(instant={"tpms": {"fl": 276}})
+        self.assertFalse(sim.coord.mqtt_motion_is_recent)
+
+    def test_transitions_wired_to_full_state_query_not_stub_only(self):
+        source = (_component.component_dir() / "__init__.py").read_text("utf-8")
+        self.assertIn("previous_mqtt_motion = coordinator.mqtt_motion_is_recent", source)
+        self.assertIn("recent_mqtt_motion = coordinator.mqtt_motion_is_recent", source)
+        self.assertIn("mqtt_client.send_command, vin, 19, {\"cmd_type\": 2}, 2", source)
+
+
     def test_parked_hvac_does_not_fake_a_new_gps_fix(self):
         sim = self.sim
         sim.push(instant={"hvac": {"hvac_inner_temp_float": 24}})
