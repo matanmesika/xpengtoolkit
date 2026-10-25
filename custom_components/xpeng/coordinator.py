@@ -897,7 +897,7 @@ class XPengDataCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if moving:
             self.last_motion_at = time.time()
             _LOGGER.info(
-                "REST fallback shows vehicle movement (%s; mqtt_energy_stale=%s "
+                "REST fallback shows the car moving (%s; mqtt_energy_stale=%s "
                 "gps_stale=%s) — arming bounded recovery",
                 motion_reason, mqtt_stale, gps_stale,
             )
