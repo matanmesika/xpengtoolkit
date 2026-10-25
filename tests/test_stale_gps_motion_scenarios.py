@@ -150,6 +150,19 @@ class ProductionHACallbackSimulation(unittest.TestCase):
         self.assertEqual(fn, self.sim.client.send_command)
         self.assertEqual(args, (VIN, 19, {"cmd_type": 2}, 2))
 
+    def dispatch_parsed_state(self, data):
+        """Join the real MQTT parser to the production HA state callback.
+
+        Older tests exercised these two boundaries separately: the parser fed
+        the coordinator directly, while the HA callback received hand-built
+        dictionaries. This adapter lets a synthetic broker frame pass through
+        both production paths in one test without opening a socket or calling a
+        vehicle service.
+        """
+        was_parked = self.sim.coord.vehicle_parked
+        self.handler(data, was_parked)
+        return True
+
     def test_fresh_d_schedules_one_full_upload_not_passive_query(self):
         self.handler(self.frame(shift="D", speed=18), True)
         self.assertFalse(self.sim.coord.vehicle_parked)
@@ -167,6 +180,36 @@ class ProductionHACallbackSimulation(unittest.TestCase):
         self.sim.coord.mqtt_motion_until = time.time() - 1
         self.assertTrue(self.sim.coord.vehicle_parked)
         self.assertEqual(len(self.sent), 1)
+
+    def test_parsed_drive_partial_gps_and_park_flow(self):
+        """Exercise MQTT decode/merge -> HA callback -> coordinator end to end."""
+        sim = self.sim
+        sim.client.set_state_callback(self.dispatch_parsed_state)
+
+        # A fresh D frame must update the verdict and queue one force-upload.
+        sim.push(instant={"drive": {"shift_state": "D", "speed": 18}})
+        self.assertFalse(sim.coord.vehicle_parked)
+        self.assert_full_state_publish()
+
+        # An unrelated partial inherits D in the merged state but must not
+        # refresh the raw-motion clock or schedule another transition upload.
+        motion_until = sim.coord.mqtt_motion_until
+        sim.push(instant={"hvac": {"hvac_inner_temp_float": 25}})
+        self.assertEqual(sim.coord.mqtt_motion_until, motion_until)
+        self.assertEqual(len(self.sent), 1)
+
+        # GPS is refreshed only when the incoming frame itself has coordinates.
+        old_fix_time = sim.coord.gps_fix.fixed_at
+        sim.push(interval={"drive": {
+            "latitude": 32.19, "longitude": 34.49, "coordValid": 1,
+        }})
+        self.assertEqual(sim.coord.gps_fix.position, (32.19, 34.49))
+        self.assertGreater(sim.coord.gps_fix.fixed_at, old_fix_time)
+
+        # A fresh P frame ends the temporary motion override.
+        sim.push(instant={"drive": {"shift_state": "P", "speed": 0}})
+        self.assertTrue(sim.coord.vehicle_parked)
+        self.assertEqual(sim.coord.last_motion_at, 0)
 
 
 class MotionEvidenceAndGpsAge(unittest.TestCase):
