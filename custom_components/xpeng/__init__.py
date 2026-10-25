@@ -25,6 +25,7 @@ from .watchdog_policy import (
     ESCALATE_BACKOFF_SECONDS,
     should_escalate,
     should_escalate_moving,
+    should_escalate_stale_gps,
 )
 
 from .const import (
@@ -1678,7 +1679,20 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 time.time(),
                 coordinator.last_motion_at,
             )
-            escalation_allowed = pending_escalation or motion_escalation
+            # A frozen position is not the same as a silent MQTT socket.
+            # HVAC/SOC updates can keep generic state freshness near zero while
+            # no new GPS fix arrives. Trigger only with RECENT motion evidence:
+            # never wake an idle, parked car solely to obtain GPS coordinates.
+            gps_fix_age = coordinator.gps_fix.age_seconds(time.time())
+            gps_motion_escalation = should_escalate_stale_gps(
+                gps_fix_age,
+                watchdog_state["last_escalation"],
+                time.time(),
+                coordinator.last_motion_at,
+            )
+            escalation_allowed = (
+                pending_escalation or motion_escalation or gps_motion_escalation
+            )
             escalated_now = poll_status.is_escalated(
                 stale,
                 watchdog_state["last_escalation"],
@@ -1836,7 +1850,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     ),
                 )
             return
-        if motion_escalation:
+        if gps_motion_escalation and not motion_escalation:
+            _LOGGER.warning(
+                "Watchdog: GPS fix %.0fmin old despite other MQTT telemetry; "
+                "recent motion evidence %.0fmin ago — sending ONE bounded "
+                "force-upload to recover the location",
+                gps_fix_age / 60,
+                (now_ts - coordinator.last_motion_at) / 60,
+            )
+        elif motion_escalation:
             _LOGGER.warning(
                 "Watchdog: %.0fmin without data and the last accepted state said "
                 "the car was moving (%.0fmin before the silence) — sending ONE "
