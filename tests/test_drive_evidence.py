@@ -345,7 +345,7 @@ class TheIntegrationActuallyUsesIt(unittest.TestCase):
         self.assertIn("view as drive_view", coordinator)
         self.assertIn("FixTracker", coordinator)
         self.assertIn("with_previous_fix", coordinator)
-        self.assertIn('return drive_view(self._last_full_data)["parked"]', coordinator)
+        self.assertIn('return self.parking_view["parked"]', coordinator)
         self.assertIn("def parking_view", coordinator)
         self.assertIn("self.note_drive_evidence(data, fresh_drive=fresh_drive)", coordinator)
         self.assertIn("data = with_previous_fix(data, self._last_full_data)", coordinator)
