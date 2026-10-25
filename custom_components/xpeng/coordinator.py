@@ -1299,16 +1299,23 @@ class XPengDataCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         means "no evidence" (None). Callers treat None as *not moving* - see
         poll_status.is_active - so this is deliberately conservative.
         """
-        return drive_view(self._last_full_data)["parked"]
+        return self.parking_view["parked"]
 
     @property
     def parking_view(self) -> dict[str, Any]:
-        """The parked verdict with the fields and reason behind it.
+        """Combine held instant gear with short-lived fresh MQTT motion evidence.
 
-        For diagnostics only: a user on issue #3 asked which field decided the
-        verdict, and the capture they had could not say.
+        A positive NEW interval speed wins temporarily over an inherited P.
+        It expires after 120 seconds or is cleared by a fresh P frame, so a
+        missed parking notification never causes permanent active polling.
         """
-        return drive_view(self._last_full_data)
+        observed = drive_view(self._last_full_data)
+        if self.mqtt_motion_is_recent and observed["parked"] is not False:
+            return {
+                **observed, "parked": False,
+                "reason": "recent raw MQTT D/speed (overrides cached P)",
+            }
+        return observed
 
     def note_drive_evidence(
         self, data: dict[str, Any], *, fresh_drive: dict[str, Any] | None = None
