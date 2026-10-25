@@ -132,8 +132,12 @@ gate = _load("xpengtest.command_gate", PKG / "command_gate.py")
 
 class _Registry:
     def __init__(self, entity_ids):
+        entry_ids = entity_ids if isinstance(entity_ids, dict) else {}
         self.entities = {
-            eid: types.SimpleNamespace(entity_id=eid, platform="xpeng")
+            eid: types.SimpleNamespace(
+                entity_id=eid, platform="xpeng",
+                config_entry_id=entry_ids.get(eid),
+            )
             for eid in entity_ids
         }
 
@@ -599,6 +603,52 @@ class TestDocsMatchPolicy(unittest.TestCase):
 
 
 # ── 3. the gate ───────────────────────────────────────────────────────────
+
+
+class TestPerVehicleServiceAuthorization(unittest.TestCase):
+    """Issue #6: authorization must be tied to the receiving vehicle."""
+
+    def test_permission_on_car_b_cannot_unlock_car_a(self):
+        hass = _Hass(
+            user=_User(is_admin=False, allowed=["switch.car_b"]),
+            entity_ids={"lock.car_a": "car_A", "switch.car_b": "car_B"},
+        )
+        call = _Call(user_id="u1")
+        p = policy.CommandPolicy.from_preset(policy.PRESET_FULL)
+        with self.assertRaises(Unauthorized):
+            _run(gate.async_guard_service(
+                hass, call, "unlock", policy.GROUP_ACCESS, p,
+                entry_id="car_A",
+            ))
+        # Permissions for car B still work for commands actually sent to B.
+        _run(gate.async_guard_service(
+            hass, call, "unlock", policy.GROUP_ACCESS, p,
+            entry_id="car_B",
+        ))
+
+    def test_explicit_foreign_target_does_not_bypass_entry_scope(self):
+        hass = _Hass(
+            user=_User(is_admin=False, allowed=["switch.car_b"]),
+            entity_ids={"lock.car_a": "car_A", "switch.car_b": "car_B"},
+        )
+        call = _Call(user_id="u1")
+        call.data["vehicle_entity_id"] = "switch.car_b"
+        with self.assertRaises(Unauthorized):
+            _run(gate.async_guard_service(
+                hass, call, "unlock", policy.GROUP_ACCESS,
+                policy.CommandPolicy.from_preset(policy.PRESET_FULL),
+                entry_id="car_A",
+            ))
+
+    def test_admin_and_automation_permissions_are_unchanged(self):
+        entries = {"lock.car_a": "car_A", "switch.car_b": "car_B"}
+        p = policy.CommandPolicy.from_preset(policy.PRESET_FULL)
+        for user, user_id in ((_User(is_admin=True), "admin"), (None, None)):
+            hass = _Hass(user=user, entity_ids=entries)
+            _run(gate.async_guard_service(
+                hass, _Call(user_id=user_id),
+                "unlock", policy.GROUP_ACCESS, p, entry_id="car_A",
+            ))
 
 
 class TestGate(unittest.TestCase):
