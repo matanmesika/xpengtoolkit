@@ -1013,6 +1013,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     def _handle_vehicle_state(data: dict[str, Any], was_parked: bool | None) -> None:
         """Update coordinator and handle parked→driving transition."""
         before = coordinator.parking_view
+        previous_mqtt_motion = coordinator.mqtt_motion_is_recent
         previous_timestamp = coordinator.last_data_timestamp
         previous_data_age = (
             (datetime.now(timezone.utc) - previous_timestamp).total_seconds()
@@ -1021,12 +1022,21 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         )
         coordinator.set_vehicle_data(data)
         _log_drive_evidence(before, coordinator.parking_view, previous_data_age)
-        # If car just started moving, force immediate query
-        if was_parked and coordinator.vehicle_parked is False:
-            _LOGGER.info("Vehicle transitioned from parked to driving — forcing query")
-            # async_add_executor_job already schedules the job and returns a
-            # Future — do NOT wrap it in async_create_task (expects a coroutine).
-            hass.async_add_executor_job(mqtt_client.send_query, vin)
+        # A new D/positive speed is proof the car is awake. Request a FULL
+        # snapshot immediately rather than a passive query that can return a
+        # stub. The recent-motion flag is sourced only from this frame's raw
+        # fields and expires after 120s if no new drive reports arrive.
+        if (
+            (was_parked and coordinator.vehicle_parked is False)
+            or (not previous_mqtt_motion and coordinator.mqtt_motion_is_recent)
+        ):
+            _LOGGER.info(
+                "Fresh parked-to-driving / speed transition — force-upload "
+                "while vehicle is awake"
+            )
+            hass.async_add_executor_job(
+                mqtt_client.send_command, vin, 19, {"cmd_type": 2}, 2
+            )
 
     mqtt_client.set_state_callback(_on_vehicle_state)
     # The REST fallback merge happens in the coordinator, so the client's own
@@ -1284,7 +1294,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     async def _send_periodic_query(_now: Any) -> None:
         now = time.time()
-        active = coordinator.is_charging or coordinator.vehicle_parked is False
+        recent_mqtt_motion = coordinator.mqtt_motion_is_recent
+        active = (
+            coordinator.is_charging
+            or coordinator.vehicle_parked is False
+            or recent_mqtt_motion
+        )
         # An external charging hint raises the cadence but NOT the kind of query:
         # `active` alone decides whether we may force-upload, because that is the
         # only thing here that can wake a car, and the hint is someone else's word
@@ -1294,7 +1309,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         # the session started, after hours of stubs).
         hint = coordinator.external_charging_hint
         min_gap = poll_status.query_interval_seconds(
-            coordinator.vehicle_parked,
+            False if recent_mqtt_motion else coordinator.vehicle_parked,
             coordinator.is_charging,
             scan_interval,
             parked_scan_interval,
