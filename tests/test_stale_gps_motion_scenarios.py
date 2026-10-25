@@ -11,8 +11,11 @@ with fake HVAC, charge, TPMS, gear and GPS sensor messages. No real VIN/GPS.
 """
 from __future__ import annotations
 
+import ast
 import importlib.util
 import sys
+import types
+from typing import Any
 import time
 import unittest
 from datetime import datetime, timedelta, timezone
@@ -89,6 +92,80 @@ class FakeG6:
             datetime.now(timezone.utc) - timedelta(hours=2)
         )
         self.coord._merge_widget_state_if_mqtt_stale(widget)
+
+
+class ProductionHACallbackSimulation(unittest.TestCase):
+    """Execute the actual nested HA event callback, not a replica of its logic."""
+
+    def setUp(self):
+        self.sim = FakeG6()
+        path = _component.component_dir() / "__init__.py"
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        fn = next(n for n in ast.walk(tree)
+                  if isinstance(n, ast.FunctionDef)
+                  and n.name == "_handle_vehicle_state")
+        self.sent = []
+
+        class FakeHass:
+            def __init__(self, sent):
+                self.sent = sent
+
+            def async_add_executor_job(self, fn, *args):
+                self.sent.append((fn, args))
+
+        self.hass = FakeHass(self.sent)
+        self.env = {
+            "coordinator": self.sim.coord,
+            "mqtt_client": self.sim.client,
+            "hass": self.hass,
+            "vin": VIN,
+            "Any": Any,
+            "datetime": datetime,
+            "timezone": timezone,
+            "_log_drive_evidence": lambda before, after, age: None,
+        }
+        exec(compile(ast.fix_missing_locations(
+            ast.Module(body=[fn], type_ignores=[])), "__init__.py", "exec"
+        ), self.env)
+        self.handler = self.env["_handle_vehicle_state"]
+
+    def frame(self, shift=None, speed=None, *, interval_speed=None):
+        import copy
+        data = copy.deepcopy(self.sim.coord._last_full_data)
+        raw = {"instant": {}, "interval": {}}
+        if shift is not None or speed is not None:
+            raw["instant"] = {"shift_state": shift, "speed": speed}
+            data["msg_content"]["instant"]["drive"].update(raw["instant"])
+        if interval_speed is not None:
+            raw["interval"] = {"speed": interval_speed}
+            data["msg_content"]["interval"]["drive"]["speed"] = interval_speed
+        data["fresh_drive"] = raw
+        data["has_fresh_gps_data"] = False
+        return data
+
+    def assert_full_state_publish(self):
+        self.assertEqual(len(self.sent), 1)
+        fn, args = self.sent[0]
+        self.assertEqual(fn, self.sim.client.send_command)
+        self.assertEqual(args, (VIN, 19, {"cmd_type": 2}, 2))
+
+    def test_fresh_d_schedules_one_full_upload_not_passive_query(self):
+        self.handler(self.frame(shift="D", speed=18), True)
+        self.assertFalse(self.sim.coord.vehicle_parked)
+        self.assert_full_state_publish()
+        self.handler(self.frame(shift="D", speed=20), False)
+        self.assertEqual(len(self.sent), 1, "no repeated transition upload")
+        self.handler(self.frame(shift="P", speed=0), False)
+        self.assertTrue(self.sim.coord.vehicle_parked)
+        self.assertEqual(len(self.sent), 1)
+
+    def test_speed_only_overrides_cached_p_and_upload_expires(self):
+        self.handler(self.frame(interval_speed=18), True)
+        self.assertFalse(self.sim.coord.vehicle_parked)
+        self.assert_full_state_publish()
+        self.sim.coord.mqtt_motion_until = time.time() - 1
+        self.assertTrue(self.sim.coord.vehicle_parked)
+        self.assertEqual(len(self.sent), 1)
 
 
 class MotionEvidenceAndGpsAge(unittest.TestCase):
