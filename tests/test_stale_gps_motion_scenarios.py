@@ -175,7 +175,7 @@ class MotionEvidenceAndGpsAge(unittest.TestCase):
     def test_new_interval_speed_is_motion_even_if_cached_gear_is_p(self):
         sim = self.sim
         sim.push(interval={"drive": {"speed": 12}})
-        self.assertTrue(sim.coord.vehicle_parked)
+        self.assertFalse(sim.coord.vehicle_parked)
         self.assertGreater(sim.coord.last_motion_at, 0)
         earlier = sim.coord.last_motion_at
         sim.push(instant={"hvac": {"hvac_inner_temp_float": 26}})
