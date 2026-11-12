@@ -135,3 +135,35 @@ def should_escalate_moving(
     if last_escalation and last_motion_at <= last_escalation:
         return False
     return True
+
+
+# GPS must be tracked independently of unrelated MQTT sensor changes. Requiring
+# RECENT independent motion evidence prevents old cached D/P from waking a car
+# that has since parked. These bounds are deliberately not configuration knobs.
+GPS_STALE_AFTER_SECONDS: float = 30 * 60
+GPS_MOTION_MAX_AGE_SECONDS: float = 15 * 60
+
+
+def should_escalate_stale_gps(
+    fix_age_seconds: float | None,
+    last_escalation: float,
+    now: float,
+    last_motion_at: float,
+) -> bool:
+    """Recover a frozen GPS during *recently confirmed* activity.
+
+    A charge/HVAC partial can keep generic MQTT freshness low for hours while
+    the tracker receives no new GPS. A GPS-only stall can therefore use the
+    same bounded motion escalation as an all-state stall, but only after a
+    real timestamped fix has aged 30min and new motion evidence was seen in
+    the last 15min. An asleep car or an unknown fix age never qualifies.
+    """
+    if fix_age_seconds is None or fix_age_seconds < GPS_STALE_AFTER_SECONDS:
+        return False
+    if not last_motion_at or last_motion_at > now:
+        return False
+    if now - last_motion_at > GPS_MOTION_MAX_AGE_SECONDS:
+        return False
+    return should_escalate_moving(
+        fix_age_seconds, last_escalation, now, last_motion_at
+    )

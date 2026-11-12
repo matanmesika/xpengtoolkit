@@ -123,7 +123,9 @@ def _fire_denied(
     hass.bus.async_fire(EVENT_COMMAND_DENIED, data)
 
 
-async def async_verify_caller_control(hass: HomeAssistant, call: ServiceCall) -> None:
+async def async_verify_caller_control(
+    hass: HomeAssistant, call: ServiceCall, *, entry_id: str | None = None
+) -> None:
     """Require caller control on the selected vehicle, or an XPENG entity.
 
     Mirrors what Home Assistant's own entity service plumbing does for
@@ -149,6 +151,7 @@ async def async_verify_caller_control(hass: HomeAssistant, call: ServiceCall) ->
         if (
             entity is not None
             and entity.platform == DOMAIN
+            and (entry_id is None or entity.config_entry_id == entry_id)
             and user.permissions.check_entity(target, POLICY_CONTROL)
         ):
             return
@@ -157,6 +160,8 @@ async def async_verify_caller_control(hass: HomeAssistant, call: ServiceCall) ->
         )
     for entity in registry.entities.values():
         if entity.platform != DOMAIN:
+            continue
+        if entry_id is not None and entity.config_entry_id != entry_id:
             continue
         if user.permissions.check_entity(entity.entity_id, POLICY_CONTROL):
             return
@@ -174,13 +179,15 @@ async def async_guard_service(
     service: str,
     group: str,
     policy: CommandPolicy,
+    *,
+    entry_id: str | None = None,
 ) -> None:
     """Raise unless this service call is permitted. Call before doing any work.
 
     ``group`` of None means the service is exempt from the ceiling (credential
     import); the caller check still applies.
     """
-    await async_verify_caller_control(hass, call)
+    await async_verify_caller_control(hass, call, entry_id=entry_id)
 
     if group is None:
         return

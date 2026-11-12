@@ -851,7 +851,18 @@ async def async_setup_services(hass: HomeAssistant) -> None:
             else:
                 entry_data = _get_entry_data(hass) or {}
             policy = entry_data.get("command_policy") or default_policy()
-            await async_guard_service(hass, call, service, group, policy)
+            # Service handlers route to this entry; caller authorization must
+            # check control over THIS car, not any XPENG entity (issue #6).
+            entry = entry_data.get("entry")
+            receiving_entry_id = getattr(entry, "entry_id", None)
+            if receiving_entry_id is None:
+                raise HomeAssistantError(
+                    "XPENG service target could not be verified; refusing command"
+                )
+            await async_guard_service(
+                hass, call, service, group, policy,
+                entry_id=receiving_entry_id,
+            )
             await handler(call)
 
         if schema is None:
