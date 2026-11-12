@@ -83,6 +83,8 @@ BINARY = bytes(range(256))  # not UTF-8, and not JSON: a CAN pack in shape if no
 class CaptureSink(unittest.TestCase):
     def test_the_sink_receives_the_exact_bytes(self) -> None:
         client = make_client()
+        # Raw capture is opt-in per topic (privacy): select this one explicitly.
+        client._capture_topics = ["Xmart/Car/+/State/#"]
         seen: list[tuple] = []
         client.set_capture_callback(lambda topic, payload, qos, retain: seen.append(
             (topic, payload, qos, retain)
@@ -97,8 +99,9 @@ class CaptureSink(unittest.TestCase):
 
     def test_a_raising_sink_does_not_take_the_connection_down(self) -> None:
         client = make_client()
+        client._capture_topics = ["#"]
 
-        def explode(*_args):
+        def explode(*_args, **_kwargs):
             raise RuntimeError("capture bug")
 
         client.set_capture_callback(explode)

@@ -91,6 +91,7 @@ def make_client(callbacks, freshness):
         _last_full_content=None,
         _state_callback=callbacks.append,
         _resolve_pending=lambda *_: None,
+        _capture_frame_if_selected=lambda *_args, **_kwargs: None,
         _handle_listener_message=lambda *_args, **_kwargs: None,
         _fire_notification=lambda *_: None,
         _fire_command_feedback=lambda *_: None,

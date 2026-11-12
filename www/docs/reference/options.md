@@ -253,6 +253,28 @@ The topics to record, one per line or comma-separated. MQTT wildcards (`+` and
 candidates `mqtt_topic_discovery` tries. Typing anything here replaces that list
 entirely.
 
+For a short-term recording of **your own primary vehicle-state messages**,
+set the capture topic list to:
+
+```text
+Xmart/Msg/User/{user_id}
+Xmart/MsgV2/User/{user_id}
+```
+
+The integration expands `{user_id}` from the active XPENG MQTT account; you
+do not need to paste the account ID anywhere. The primary stream is already
+subscribed at QoS 1 and is recorded before it is parsed, including malformed
+frames and no-data replies. The V2 stream is also already subscribed and is
+useful when investigating changes to the cloud push protocol. Do **not**
+enable MQTT discovery for this: the eight wildcard CAN candidates are
+unrelated to state updates and may all be refused by the broker.
+
+The capture contains raw location, vehicle identifiers and command/notification
+payloads. Keep `.xpgcan` files private, remove or redact sensitive fields
+before sharing any decoded output, and turn capture off after diagnosis.
+The recorder's hard limit is 2 GiB of payload data, with file rotation at
+256 MiB per part, so check free space and capture statistics.
+
 Note that `Xmart/Car/+/...` is every car the broker will hand you, not yours. The
 summary reports each car id it finds, so a capture that contains another vehicle's
 traffic says so.
