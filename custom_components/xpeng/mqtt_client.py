@@ -1163,7 +1163,7 @@ class XPengMQTTClient:
         if topic == self.recv_topic:
             self._capture_frame_if_selected(
                 topic, payload_bytes,
-                qos=int(msg.qos or 0),
+                qos=int(getattr(msg, "qos", 0) or 0),
                 retain=bool(getattr(msg, "retain", False)),
             )
 
@@ -1172,7 +1172,7 @@ class XPengMQTTClient:
             self._handle_listener_message(
                 topic,
                 payload_bytes,
-                qos=int(msg.qos or 0),
+                qos=int(getattr(msg, "qos", 0) or 0),
                 retain=bool(getattr(msg, "retain", False)),
             )
             return
