@@ -7,7 +7,7 @@ from datetime import datetime, timedelta, timezone
 from homeassistant.components.device_tracker import SourceType
 from homeassistant.components.device_tracker.config_entry import TrackerEntity
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.event import async_track_time_interval
 
@@ -52,6 +52,7 @@ class XPengDeviceTracker(XPengEntity, TrackerEntity):
             )
         )
 
+    @callback
     def _refresh_location_freshness(self, _now: datetime) -> None:
         """Expire the displayed GPS state even if no coordinator update arrives."""
         self.async_write_ha_state()

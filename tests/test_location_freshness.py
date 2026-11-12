@@ -223,6 +223,12 @@ def test_tracker_availability_ages_out_without_new_push(freshness):
         pass
 
     scheduled = []
+    def fake_callback(fn):
+        # Home Assistant's @callback marks a synchronous callable as safe
+        # to schedule directly on the event loop instead of the executor.
+        fn._test_loop_callback = True
+        return fn
+
     def fake_timer(hass, callback, interval):
         scheduled.append((callback, interval))
         return lambda: None
@@ -240,6 +246,7 @@ def test_tracker_availability_ages_out_without_new_push(freshness):
         "location_age_seconds": freshness.location_age_seconds,
         "datetime": datetime, "timezone": timezone, "timedelta": timedelta,
         "async_track_time_interval": fake_timer,
+        "callback": fake_callback,
     }
     exec(compile(ast.fix_missing_locations(module), str(ROOT / "device_tracker.py"), "exec"), env)
     cls = env["XPengDeviceTracker"]
@@ -258,6 +265,10 @@ def test_tracker_availability_ages_out_without_new_push(freshness):
     asyncio.run(entity.async_added_to_hass())
     assert len(scheduled) == 1
     assert scheduled[0][1] == timedelta(seconds=60)
+    assert getattr(scheduled[0][0].__func__, "_test_loop_callback", False), (
+        "GPS freshness timer must be marked @callback; otherwise HA "
+        "runs it on an executor thread and async_write_ha_state crashes"
+    )
     scheduled[0][0](datetime.now(timezone.utc))
     assert entity.writes == 1
     assert len(entity.remove_callbacks) == 1

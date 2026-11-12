@@ -104,3 +104,23 @@ def assert_is_default_target() -> None:
             f"NOTE: testing {chosen.name} at {chosen} "
             f"(XPENG_COMPONENT is set; the shipping copy is the default)"
         )
+
+
+def mqtt_test_module_name(name: str) -> str:
+    """Give path-loaded MQTT modules a package for their relative imports.
+
+    A standalone spec named `mqtt_client_under_test` has no parent, so it
+    cannot resolve `.location_freshness`. Real HA imports it as
+    `custom_components.xpeng.mqtt_client`. Reproduce only the package context
+    here, without importing Home Assistant.
+    """
+    import sys
+    import types
+
+    package_name = "_xpeng_component_test_package"
+    pkg = sys.modules.get(package_name)
+    if pkg is None:
+        pkg = types.ModuleType(package_name)
+        pkg.__path__ = [str(component_dir())]
+        sys.modules[package_name] = pkg
+    return f"{package_name}.{name}"

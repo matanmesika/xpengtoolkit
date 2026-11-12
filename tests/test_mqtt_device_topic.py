@@ -67,7 +67,7 @@ def _stub_paho() -> None:
 def _load() -> types.ModuleType:
     _stub_paho()
     path = _component.module_path("mqtt_client.py")
-    spec = importlib.util.spec_from_file_location("mqtt_client_device_topic", path)
+    spec = importlib.util.spec_from_file_location(_component.mqtt_test_module_name("mqtt_client_device_topic"), path)
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)
     sys.modules["mqtt_client_device_topic"] = module

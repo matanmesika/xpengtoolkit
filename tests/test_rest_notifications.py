@@ -217,7 +217,8 @@ class TestNotificationIdNamespacing(unittest.TestCase):
         for node in ast.walk(tree):
             if isinstance(node, ast.FunctionDef) and node.name == "_notification_id":
                 mod = ast.Module(body=[node], type_ignores=[])
-                ns: dict = {}
+                from typing import Any
+                ns: dict = {"Any": Any}
                 exec(compile(mod, "<id>", "exec"), ns)
                 self.fn = staticmethod(ns["_notification_id"]).__func__
                 break

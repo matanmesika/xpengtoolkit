@@ -57,7 +57,7 @@ def _stub_paho() -> None:
 
 
 _stub_paho()
-_spec = importlib.util.spec_from_file_location("mqtt_client_under_test", MODULE_PATH)
+_spec = importlib.util.spec_from_file_location(_component.mqtt_test_module_name("mqtt_client_under_test"), MODULE_PATH)
 assert _spec and _spec.loader
 mqtt_client = importlib.util.module_from_spec(_spec)
 sys.modules["mqtt_client_under_test"] = mqtt_client
