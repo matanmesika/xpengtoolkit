@@ -18,6 +18,7 @@ The credentials themselves are never logged.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from typing import Any
@@ -110,10 +111,38 @@ async def _apply_to_running_client(
         server=server,
         expires_at=expires_at,
     )
-    reconnected = await hass.async_add_executor_job(
-        client.reconnect, "credential import: renewed pair"
-    )
-    if reconnected and vin:
+    # The watchdog and authentication handler can already be reconnecting when
+    # the renewal import lands. reconnect() deliberately returns False in that
+    # case to avoid two MQTT clients with the same clientId. Do NOT acknowledge
+    # the import as applied unless a reconnect using the staged pair actually
+    # starts: a skipped reconnect previously returned HTTP 200 and made the
+    # renewal worker wait another 100 minutes while state stayed stale.
+    #
+    # Retry only the local reconnect, never login / captcha / mint. Give a busy
+    # reconnect a bounded 5 seconds to release its lock; if still blocked,
+    # raise so xpeng_renew retries delivery of the *same* minted pair.
+    reconnected = False
+    for attempt in range(6):
+        reconnected = await hass.async_add_executor_job(
+            client.reconnect, "credential import: renewed pair"
+        )
+        if reconnected:
+            break
+        if attempt < 5:
+            _LOGGER.info(
+                "MQTT reconnect busy during credential import; retry %d/5 in 1s",
+                attempt + 1,
+            )
+            await asyncio.sleep(1)
+    if not reconnected:
+        _LOGGER.warning(
+            "Credential pair was staged but MQTT reconnect stayed busy; "
+            "requesting a retry of the saved pair"
+        )
+        raise RuntimeError(
+            "MQTT reconnect busy after credential import; retry saved pair"
+        )
+    if vin:
         await hass.async_add_executor_job(client.send_query, vin)
 
     coordinator = entry_data.get("coordinator")
@@ -231,8 +260,6 @@ async def async_import_credentials(
         # over any previously stored id.
         options={**entry.options, CONF_CONFIGURED_DEVICE_ID: device_id},
     )
-    _clear_reauth_repair(hass, entry)
-
     if reload_needed:
         await hass.config_entries.async_reload(entry.entry_id)
         _LOGGER.info(
@@ -257,6 +284,9 @@ async def async_import_credentials(
             resolved_vin or entry.title,
             device_id[:8] + "..." if device_id else "unknown",
         )
+    # Do not clear the reauth notice if reconnect was skipped/failed: in that
+    # case the add-on must still retry importing the saved pair.
+    _clear_reauth_repair(hass, entry)
     return {
         "entry_id": entry.entry_id,
         "vin": resolved_vin,
